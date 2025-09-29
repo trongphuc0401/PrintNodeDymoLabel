@@ -151,6 +151,23 @@
       background: #218838;
     }
 
+    .retry-btn {
+      background: #ffc107;
+      color: #212529;
+      border: none;
+      padding: 5px 10px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+      transition: all 0.2s ease-in-out;
+    }
+
+    .retry-btn:hover {
+      background: #e0a800;
+      transform: translateY(-1px);
+    }
+
     .jobs-table {
       width: 100%;
       border-collapse: collapse;
@@ -277,6 +294,7 @@
                     <th>Product</th>
                     <th>Job ID</th>
                     <th>Status</th>
+                    <th>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -285,19 +303,35 @@
                       <td>
                         <%= new Date(job.timestamp).toLocaleString('vi-VN') %>
                       </td>
-                      <td><strong>#<%= job.orderId %></strong></td>
+                      <td><strong>
+                          <%= job.orderId %>
+                        </strong></td>
                       <td>
                         <%= job.productName %>
+                          <% if (job.variantTitle) { %>
+                            <br><small style="color: #6c757d;">
+                              <%= job.variantTitle %>
+                            </small>
+                            <% } %>
                       </td>
-                      <td><code><%= job.id %></code></td>
+                      <td><code>
+                          <%= job.id || 'N/A' %>
+                        </code></td>
                       <td>
                         <span class="status-badge status-<%= job.status %>">
                           <%= job.status %>
                         </span>
                         <% if (job.error) { %>
-                          <br><small style="color: #dc3545;">
-                            <%= job.error %>
+                          <br><small style="color: #dc3545;" title="<%= job.error %>">
+                            <%= job.error.length> 40 ? job.error.substring(0, 40) + '...' : job.error %>
                           </small>
+                          <% } %>
+                      </td>
+                      <td>
+                        <% if (job.status==='failed' ) { %>
+                          <button class="retry-btn" onclick="retryJob('<%= job.jobAttemptId %>')">
+                            🔄 Retry
+                          </button>
                           <% } %>
                       </td>
                     </tr>
@@ -332,6 +366,30 @@
         }
       } catch (error) {
         alert('❌ Error: ' + error.message);
+      }
+    }
+
+    async function retryJob(jobAttemptId) {
+      if (!confirm('Are you sure you want to retry this print job?')) {
+        return;
+      }
+      try {
+        const response = await fetch(`/api/retry-job/${jobAttemptId}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
+        const result = await response.json();
+
+        if (response.ok) {
+          alert('✅ Job successfully sent for retry!');
+          setTimeout(() => location.reload(), 500);
+        } else {
+          throw new Error(result.message || 'An unknown error occurred.');
+        }
+      } catch (error) {
+        alert('❌ Retry failed: ' + error.message);
       }
     }
 

@@ -107,7 +107,7 @@ async function sendToPrintNode(pdfBase64, title) {
 }
 
 // Shopify Webhook Handler
-app.post('/webhooks/shopify/order-payment', async (req, res) => {
+app.post('/webhooks', async (req, res) => {
   try {
     const order = req.body;
     const orderId = order.id;
@@ -134,6 +134,9 @@ app.post('/webhooks/shopify/order-payment', async (req, res) => {
     for (let i = 0; i < lineItems.length; i++) {
       const item = lineItems[i];
       
+      // Generate a unique ID for this specific print attempt
+      const jobAttemptId = `${orderNumber}-${item.id || i}`;
+
       try {
         console.log(`🖨️  Processing item ${i + 1}/${lineItems.length}: ${item.title} ${item.variant_title ? '- ' + item.variant_title : ''}`);
 
@@ -147,7 +150,8 @@ app.post('/webhooks/shopify/order-payment', async (req, res) => {
         const printResponse = await sendToPrintNode(pdfBase64, printTitle);
 
         const jobRecord = {
-          id: printResponse,
+          id: printResponse, // From PrintNode
+          jobAttemptId: jobAttemptId, // Our internal ID
           orderId: orderNumber,
           productName: item.title,
           variantTitle: item.variant_title,
@@ -169,15 +173,24 @@ app.post('/webhooks/shopify/order-payment', async (req, res) => {
         
       } catch (error) {
         console.error(`❌ Failed to print item ${i + 1} (${item.title}):`, error.message);
-        printResults.push({
+        const failedJobRecord = {
+          id: null, // No PrintNode ID on failure
+          jobAttemptId: jobAttemptId, // Our internal ID
           orderId: orderNumber,
           productName: item.title,
           variantTitle: item.variant_title,
           sku: item.sku,
           status: 'failed',
           error: error.message,
-          timestamp: new Date().toISOString()
-        });
+          timestamp: new Date().toISOString(),
+          // Store data needed for retry
+          retryData: {
+            item: item,
+            orderInfo: orderInfo
+          }
+        };
+        printJobs.unshift(failedJobRecord);
+        printResults.push(failedJobRecord);
       }
     }
 
@@ -205,20 +218,58 @@ app.post('/webhooks/shopify/order-payment', async (req, res) => {
   }
 });
 
-// Dashboard Routes
-app.get('/', (req, res) => {
-  res.render('dashboard', {
-    printJobs: printJobs,
-    printerConfig: {
-      printerId: PRINTER_ID,
-      apiConfigured: !!PRINTNODE_API_KEY
-    }
-  });
-});
+// API endpoint to retry a failed job
+app.post('/api/retry-job/:jobAttemptId', async (req, res) => {
+  const { jobAttemptId } = req.params;
+  const jobToRetry = printJobs.find(job => job.jobAttemptId === jobAttemptId);
 
-// API endpoint to get jobs
-app.get('/api/jobs', (req, res) => {
-  res.json(printJobs);
+  if (!jobToRetry) {
+    return res.status(404).json({ success: false, message: 'Job not found.' });
+  }
+
+  if (jobToRetry.status !== 'failed') {
+    return res.status(400).json({ success: false, message: 'Job is not in a failed state.' });
+  }
+
+  if (!jobToRetry.retryData) {
+    return res.status(400).json({ success: false, message: 'No retry data available for this job.' });
+  }
+
+  try {
+    const { item, orderInfo } = jobToRetry.retryData;
+    console.log(`🔁 Retrying print for: ${item.title}`);
+
+    // 1. Re-create PDF
+    const pdfBase64 = await createProductLabelPDF(item, orderInfo);
+
+    // 2. Re-build title
+    const printTitle = `${orderInfo.orderNumber} - ${item.title}${item.variant_title ? ' - ' + item.variant_title : ''}`;
+
+    // 3. Send to PrintNode
+    const printResponse = await sendToPrintNode(pdfBase64, printTitle);
+
+    // 4. Update job record on success
+    jobToRetry.id = printResponse; // New PrintNode ID
+    jobToRetry.status = 'sent';
+    jobToRetry.timestamp = new Date().toISOString();
+    jobToRetry.error = null;
+    delete jobToRetry.retryData; // Clean up retry data
+
+    console.log(`✅ Retry successful! New PrintNode Job ID: ${printResponse}`);
+
+    res.json({
+      success: true,
+      message: 'Job successfully retried.',
+      job: jobToRetry
+    });
+
+  } catch (error) {
+    // 5. Update job record on another failure
+    jobToRetry.error = error.message;
+    jobToRetry.timestamp = new Date().toISOString();
+    console.error(`❌ Retry failed for job ${jobAttemptId}:`, error.message);
+    res.status(500).json({ success: false, message: 'Failed to retry job.', error: error.message });
+  }
 });
 
 // Test endpoint - Test with 2 products
