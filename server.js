@@ -11,7 +11,7 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static('public'));
 app.set('view engine', 'ejs');
-app.set('views', path.join(__dirname, '../views')); // Fix views path
+app.set('views', path.join(__dirname, './')); // Fix views path
 
 // Store print jobs in memory (use database in production)
 let printJobs = [];
