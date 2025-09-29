@@ -2,10 +2,27 @@ const express = require('express');
 const PDFDocument = require('pdfkit');
 const axios = require('axios');
 const path = require('path');
+const Database = require('better-sqlite3'); // 1. Import thư viện
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// 2. Khởi tạo kết nối CSDL
+// Thao tác này sẽ tạo file `print_system.db` nếu nó chưa tồn tại
+const db = new Database('print_system.db', { verbose: console.log });
+
+// 3. Tạo bảng nếu chưa có
+// Bảng này sẽ lưu các sự kiện từ PrintNode
+db.exec(`
+  CREATE TABLE IF NOT EXISTS printnode_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT,
+    content TEXT,
+    received_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+// Bạn cũng nên tạo một bảng cho `printJobs` theo cách tương tự
 
 // Middleware
 app.use(express.json({ limit: '10mb' }));
@@ -14,11 +31,14 @@ app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, './')); // Fix views path
 
 // Store print jobs in memory (use database in production)
-let printJobs = [];
+let printJobs = []; // Sẽ được thay thế bằng CSDL
+// Store PrintNode webhook events in memory
+// let printNodeEvents = []; // Dòng này không còn cần thiết
 
 // PrintNode Configuration
 const PRINTNODE_API_KEY = process.env.PRINTNODE_API_KEY;
 const PRINTER_ID = process.env.PRINTER_ID || 74727567;
+const PRINTNODE_WEBHOOK_SECRET = process.env.PRINTNODE_WEBHOOK_SECRET; // Add this
 
 // Create PDF from order item - 19mm x 51mm label (landscape)
 async function createProductLabelPDF(orderItem, orderInfo) {
@@ -105,6 +125,83 @@ async function sendToPrintNode(pdfBase64, title) {
     throw error;
   }
 }
+
+// Dashboard Route
+app.get('/', (req, res) => {
+  // Sort jobs by timestamp descending before rendering
+  const sortedJobs = [...printJobs].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  
+  const printerConfig = {
+    printerId: PRINTER_ID,
+    apiConfigured: !!PRINTNODE_API_KEY
+  };
+
+  res.render('dashboard', {
+    printJobs: sortedJobs,
+    printerConfig: printerConfig
+  });
+});
+
+// API endpoint to get current jobs (for dashboard auto-refresh)
+app.get('/api/jobs', (req, res) => {
+  const sortedJobs = [...printJobs].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  res.json(sortedJobs);
+});
+
+// PrintNode Webhook Receiver
+app.post('/printnode-webhook', (req, res) => {
+  const receivedSecret = req.headers['x-printnode-webhook-secret'];
+
+  // 1. Validate the secret
+  if (!PRINTNODE_WEBHOOK_SECRET || receivedSecret !== PRINTNODE_WEBHOOK_SECRET) {
+    console.warn('⚠️ Received webhook with invalid secret.');
+    return res.status(401).send('Unauthorized');
+  }
+
+  // 2. Process the events and save to DB
+  const events = req.body;
+  if (Array.isArray(events)) {
+    console.log(`🔔 Received ${events.length} event(s) from PrintNode webhook.`);
+    
+    // Chuẩn bị câu lệnh để chèn dữ liệu
+    const insert = db.prepare('INSERT INTO printnode_events (event_type, content) VALUES (?, ?)');
+
+    // Chạy transaction để chèn nhiều bản ghi hiệu quả hơn
+    const insertMany = db.transaction((items) => {
+      for (const item of items) {
+        // Lưu toàn bộ object event dưới dạng chuỗi JSON
+        insert.run(item.event, JSON.stringify(item));
+      }
+    });
+
+    insertMany(events);
+  }
+
+  // 3. Respond correctly to PrintNode
+  res.set('X-PrintNode-Webhook-Status', 'OK').status(200).send('OK');
+});
+
+// Page to display PrintNode webhook events
+app.get('/printnode-status', (req, res) => {
+  // Lấy 100 sự kiện gần nhất từ CSDL
+  const stmt = db.prepare('SELECT * FROM printnode_events ORDER BY received_at DESC LIMIT 100');
+  const eventsFromDb = stmt.all();
+
+  // Chuyển đổi content từ chuỗi JSON thành object để hiển thị
+  const formattedEvents = eventsFromDb.map(row => {
+    const content = JSON.parse(row.content);
+    return {
+      ...content, // Giữ lại các trường gốc như timestamp, event
+      received_at: row.received_at // Thêm thời gian nhận được từ CSDL
+    };
+  });
+
+  res.render('status', { 
+    events: formattedEvents,
+    webhookConfigured: !!PRINTNODE_WEBHOOK_SECRET
+  });
+});
+
 
 // Shopify Webhook Handler
 app.post('/webhooks', async (req, res) => {
@@ -243,7 +340,7 @@ app.post('/api/retry-job/:jobAttemptId', async (req, res) => {
     const pdfBase64 = await createProductLabelPDF(item, orderInfo);
 
     // 2. Re-build title
-    const printTitle = `${orderInfo.orderNumber} - ${item.title}${item.variant_title ? ' - ' + item.variant_title : ''}`;
+    const printTitle = `${orderInfo.orderNumber} - ${item.title}${item.variantTitle ? ' - ' + item.variantTitle : ''}`;
 
     // 3. Send to PrintNode
     const printResponse = await sendToPrintNode(pdfBase64, printTitle);

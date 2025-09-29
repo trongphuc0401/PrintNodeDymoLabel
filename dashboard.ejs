@@ -123,7 +123,8 @@
     }
 
     .refresh-btn,
-    .test-btn {
+    .test-btn,
+    .status-btn {
       background: #667eea;
       color: white;
       border: none;
@@ -133,6 +134,15 @@
       font-size: 14px;
       font-weight: 600;
       transition: all 0.3s;
+    }
+
+    .status-btn {
+      background: #17a2b8;
+      margin-left: 10px;
+    }
+
+    .status-btn:hover {
+      background: #138496;
     }
 
     .refresh-btn:hover,
@@ -274,8 +284,9 @@
           <div class="jobs-header">
             <h2>Print Jobs History</h2>
             <div class="button-group">
-              <button class="test-btn" onclick="testPrint()">🧪 Test Print</button>
               <button class="refresh-btn" onclick="refreshJobs()">🔄 Refresh</button>
+              <button class="test-btn" onclick="testPrint()">🧪 Test Print</button>
+              <a href="/printnode-status" class="status-btn">📡 Status Page</a>
             </div>
           </div>
 
