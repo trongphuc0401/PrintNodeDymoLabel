@@ -37,18 +37,34 @@ let printJobs = []; // Sẽ được thay thế bằng CSDL
 
 // PrintNode Configuration
 const PRINTNODE_API_KEY = process.env.PRINTNODE_API_KEY;
-const PRINTER_ID = process.env.PRINTER_ID || 74727567;
+const PRINTER_ID = process.env.PRINTER_ID || 74652384;
 const PRINTNODE_WEBHOOK_SECRET = process.env.PRINTNODE_WEBHOOK_SECRET; // Add this
 
-// Create PDF from order item - 19mm x 51mm label (landscape)
 async function createProductLabelPDF(orderItem, orderInfo) {
   return new Promise((resolve, reject) => {
     try {
-      // 19mm x 51mm = 53.86pt x 144.57pt (1mm = 2.83465pt)
-      const doc = new PDFDocument({ 
-        size: [144.57, 53.86], // width x height in points (landscape)
-        margin: 5 
+      // Gốc: 51mm ngang x 19mm dọc
+      const pageWidth = 164.57; // 51mm
+      const pageHeight = 53.86; // 19mm
+
+      const doc = new PDFDocument({
+        size: [pageWidth, pageHeight],
+        margin: 0
       });
+
+
+      try {
+        doc.registerFont('Roboto-Bold', path.join(__dirname, 'fonts', 'Roboto-Bold.ttf'));
+        doc.registerFont('Roboto-Regular', path.join(__dirname, 'fonts', 'Roboto-Regular.ttf'));
+        doc.registerFont('Roboto-Italic', path.join(__dirname, 'fonts', 'Roboto-Italic.ttf'));
+      } catch (fontError) {
+        console.error('Lỗi đăng ký font:', fontError.message);
+        // Nếu không tìm thấy file font, sử dụng font mặc định để tránh crash
+        // Lưu ý: Font mặc định có thể không hiển thị tiếng Việt
+        doc.font('Helvetica-Bold'); 
+      }
+      // --- KẾT THÚC THAY ĐỔI ---
+
       const chunks = [];
 
       doc.on('data', chunk => chunks.push(chunk));
@@ -58,40 +74,55 @@ async function createProductLabelPDF(orderItem, orderInfo) {
         resolve(base64String);
       });
 
-      // Calculate center position
-      const pageWidth = 144.57;
-      const pageHeight = 53.86;
-      let yPosition = 8;
+      // 👉 Nếu muốn lật ngược 180 độ (in upside down)
+      // doc.rotate(180, { origin: [pageWidth/2, pageHeight/2] });
 
-      // Product Title - centered and bold
-      doc.fontSize(9)
-         .font('Helvetica-Bold')
-         .text(orderItem.title || 'N/A', 5, yPosition, {
-           width: pageWidth - 10,
-           align: 'center'
-         });
+      // Layout params
+      let yPosition = 7; 
+      const contentWidth = pageWidth;
+  
+   // Order Number
+      doc.fontSize(6)
+        .font('Roboto-Bold')
+        .text(orderInfo.orderNumber || 'N/A', 5, yPosition, {
+          width: contentWidth,
+          align: 'center'
+        });
 
-      yPosition += 12;
+      yPosition += 9;
 
-      // Variant Title - centered (if exists)
+      // Product Title
+      doc.fontSize(7)
+        .font('Roboto-Bold')
+        .text(orderItem.title || 'N/A', 45, yPosition, {
+          width: contentWidth,
+          align: 'center',
+          ellipsis: true
+        });
+
+      yPosition += 9;
+
+      // Variant Title
       if (orderItem.variant_title) {
-        doc.fontSize(7)
-           .font('Helvetica')
-           .text(orderItem.variant_title, 5, yPosition, {
-             width: pageWidth - 10,
-             align: 'center'
-           });
-        yPosition += 10;
+        doc.fontSize(6)
+          .font('Roboto-Regular')
+          .text(orderItem.variant_title, 45, yPosition, {
+            width: contentWidth,
+            align: 'center',
+            ellipsis: true
+          });
+        yPosition += 8;
       }
 
-      // Note - centered and italic (if exists)
+      // Note
       if (orderInfo.note) {
-        doc.fontSize(6)
-           .font('Helvetica-Oblique') // Oblique = Italic
-           .text(orderInfo.note, 5, yPosition, {
-             width: pageWidth - 10,
-             align: 'center'
-           });
+        doc.fontSize(5)
+          .font('Roboto-Italic')
+          .text(orderInfo.note, 45, yPosition, {
+            width: contentWidth,
+            align: 'center',
+            ellipsis: true
+          });
       }
 
       doc.end();
@@ -100,6 +131,7 @@ async function createProductLabelPDF(orderItem, orderInfo) {
     }
   });
 }
+
 
 // Send print job to PrintNode
 async function sendToPrintNode(pdfBase64, title) {
@@ -110,7 +142,9 @@ async function sendToPrintNode(pdfBase64, title) {
         printerId: parseInt(PRINTER_ID),
         title: title,
         contentType: 'pdf_base64',
-        content: pdfBase64
+        content: pdfBase64,
+        source: 'Shopify Print Client'
+        // BỎ HẾT OPTIONS - Để driver máy in tự xử lý
       },
       {
         headers: {
@@ -125,6 +159,7 @@ async function sendToPrintNode(pdfBase64, title) {
     throw error;
   }
 }
+
 
 // Dashboard Route
 app.get('/', (req, res) => {
@@ -183,11 +218,11 @@ app.post('/printnode-webhook', (req, res) => {
 
 // Page to display PrintNode webhook events
 app.get('/printnode-status', (req, res) => {
-  // Lấy 100 sự kiện gần nhất từ CSDL
+  // 1. Lấy 100 sự kiện gần nhất từ CSDL
   const stmt = db.prepare('SELECT * FROM printnode_events ORDER BY received_at DESC LIMIT 100');
   const eventsFromDb = stmt.all();
 
-  // Chuyển đổi content từ chuỗi JSON thành object để hiển thị
+  // 2. Chuyển đổi content từ chuỗi JSON thành object để hiển thị
   const formattedEvents = eventsFromDb.map(row => {
     const content = JSON.parse(row.content);
     return {
@@ -196,6 +231,7 @@ app.get('/printnode-status', (req, res) => {
     };
   });
 
+  // 3. Render trang 'status.ejs' với dữ liệu đã lấy được
   res.render('status', { 
     events: formattedEvents,
     webhookConfigured: !!PRINTNODE_WEBHOOK_SECRET
@@ -208,7 +244,7 @@ app.post('/webhooks', async (req, res) => {
   try {
     const order = req.body;
     const orderId = order.id;
-    const orderNumber = order.name || order.order_number; // #9999
+    const orderNumber = order.name || order.order_number;
     const lineItems = order.line_items || [];
     const currency = order.currency || 'VND';
     const shippingAddress = order.shipping_address;
@@ -231,63 +267,64 @@ app.post('/webhooks', async (req, res) => {
     for (let i = 0; i < lineItems.length; i++) {
       const item = lineItems[i];
       
-      // Generate a unique ID for this specific print attempt
-      const jobAttemptId = `${orderNumber}-${item.id || i}`;
+      // Loop for the quantity of each item
+      for (let j = 0; j < item.quantity; j++) {
+        // Generate a unique ID for this specific print attempt, including the copy number
+        const jobAttemptId = `${orderNumber}-${item.id || i}-${j + 1}`;
 
-      try {
-        console.log(`🖨️  Processing item ${i + 1}/${lineItems.length}: ${item.title} ${item.variant_title ? '- ' + item.variant_title : ''}`);
+        try {
+          console.log(`🖨️  Processing item ${i + 1}/${lineItems.length} (Copy ${j + 1}/${item.quantity}): ${item.title}`);
 
-        // Create separate PDF for this product
-        const pdfBase64 = await createProductLabelPDF(item, orderInfo);
+          // Create separate PDF for this product
+          const pdfBase64 = await createProductLabelPDF(item, orderInfo);
 
-        // Build title for print job
-        const printTitle = `${orderNumber} - ${item.title}${item.variant_title ? ' - ' + item.variant_title : ''}`;
+          // Build title for print job
+          const printTitle = `${orderNumber} - ${item.title}${item.variant_title ? ' - ' + item.variant_title : ''} (${j + 1}/${item.quantity})`;
 
-        // Send to PrintNode - SEPARATE PRINT JOB
-        const printResponse = await sendToPrintNode(pdfBase64, printTitle);
+          // Send to PrintNode - SEPARATE PRINT JOB
+          const printResponse = await sendToPrintNode(pdfBase64, printTitle);
 
-        const jobRecord = {
-          id: printResponse, // From PrintNode
-          jobAttemptId: jobAttemptId, // Our internal ID
-          orderId: orderNumber,
-          productName: item.title,
-          variantTitle: item.variant_title,
-          sku: item.sku,
-          quantity: item.quantity,
-          status: 'sent',
-          timestamp: new Date().toISOString()
-        };
+          const jobRecord = {
+            id: printResponse, // From PrintNode
+            jobAttemptId: jobAttemptId, // Our internal ID
+            orderId: orderNumber,
+            productName: item.title,
+            variantTitle: item.variant_title,
+            sku: item.sku,
+            quantity: item.quantity, // Keep original quantity for info
+            status: 'sent',
+            timestamp: new Date().toISOString()
+          };
 
-        printJobs.unshift(jobRecord);
-        printResults.push(jobRecord);
+          printJobs.unshift(jobRecord);
+          printResults.push(jobRecord);
 
-        console.log(`✅ Print job ${i + 1} sent successfully (Job ID: ${printResponse})`);
-        
-        // Small delay between prints to avoid overwhelming the printer
-        if (i < lineItems.length - 1) {
+          console.log(`✅ Print job for ${item.title} (Copy ${j + 1}) sent successfully (Job ID: ${printResponse})`);
+          
+          // Small delay between EACH print to avoid overwhelming the printer
           await new Promise(resolve => setTimeout(resolve, 500));
+          
+        } catch (error) {
+          console.error(`❌ Failed to print item ${i + 1} (${item.title}), Copy ${j + 1}:`, error.message);
+          const failedJobRecord = {
+            id: null, // No PrintNode ID on failure
+            jobAttemptId: jobAttemptId, // Our internal ID
+            orderId: orderNumber,
+            productName: item.title,
+            variantTitle: item.variant_title,
+            sku: item.sku,
+            status: 'failed',
+            error: error.message,
+            timestamp: new Date().toISOString(),
+            // Store data needed for retry
+            retryData: {
+              item: item,
+              orderInfo: orderInfo
+            }
+          };
+          printJobs.unshift(failedJobRecord);
+          printResults.push(failedJobRecord);
         }
-        
-      } catch (error) {
-        console.error(`❌ Failed to print item ${i + 1} (${item.title}):`, error.message);
-        const failedJobRecord = {
-          id: null, // No PrintNode ID on failure
-          jobAttemptId: jobAttemptId, // Our internal ID
-          orderId: orderNumber,
-          productName: item.title,
-          variantTitle: item.variant_title,
-          sku: item.sku,
-          status: 'failed',
-          error: error.message,
-          timestamp: new Date().toISOString(),
-          // Store data needed for retry
-          retryData: {
-            item: item,
-            orderInfo: orderInfo
-          }
-        };
-        printJobs.unshift(failedJobRecord);
-        printResults.push(failedJobRecord);
       }
     }
 
@@ -375,18 +412,11 @@ app.post('/api/test-print', async (req, res) => {
     // Simulate 2 products order
     const testItems = [
       {
-        title: 'ZIN PROMENADE Picnic Basket',
-        variant_title: 'Large / Blue',
-        quantity: 1,
+        title: 'Bạc xỉu pha máy',
+        variant_title: 'ICED',
+        quantity: 2,
         sku: 'PIC BAS 003',
         price: '56'
-      },
-      {
-        title: 'ZEN Country Picnic Basket',
-        variant_title: 'Medium / Red',
-        quantity: 1,
-        sku: 'PIC BAS 002',
-        price: '80'
       }
     ];
 
