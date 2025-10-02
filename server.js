@@ -22,7 +22,24 @@ db.exec(`
     received_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )
 `);
-// Bạn cũng nên tạo một bảng cho `printJobs` theo cách tương tự
+// 2. Tạo bảng cho printJobs
+db.exec(`
+  CREATE TABLE IF NOT EXISTS print_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    printnode_job_id INTEGER,
+    job_attempt_id TEXT UNIQUE,
+    order_id TEXT,
+    product_name TEXT,
+    variant_title TEXT,
+    sku TEXT,
+    quantity INTEGER, -- THÊM CỘT NÀY
+    price TEXT,       -- THÊM CỘT NÀY
+    status TEXT,
+    error_message TEXT,
+    retry_data TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`);
 
 // Middleware
 app.use(express.json({ limit: '10mb' }));
@@ -31,7 +48,8 @@ app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, './')); // Fix views path
 
 // Store print jobs in memory (use database in production)
-let printJobs = []; // Sẽ được thay thế bằng CSDL
+// let printJobs = []; // KHÔNG DÙNG NỮA, thay bằng CSDL
+
 // Store PrintNode webhook events in memory
 // let printNodeEvents = []; // Dòng này không còn cần thiết
 
@@ -163,24 +181,48 @@ async function sendToPrintNode(pdfBase64, title) {
 
 // Dashboard Route
 app.get('/', (req, res) => {
-  // Sort jobs by timestamp descending before rendering
-  const sortedJobs = [...printJobs].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-  
+  // Lấy jobs từ CSDL
+  const jobsFromDb = db.prepare('SELECT * FROM print_jobs ORDER BY created_at DESC LIMIT 100').all();
+
   const printerConfig = {
     printerId: PRINTER_ID,
     apiConfigured: !!PRINTNODE_API_KEY
   };
 
   res.render('dashboard', {
-    printJobs: sortedJobs,
+    printJobs: jobsFromDb.map(job => ({ // Ánh xạ lại tên trường cho nhất quán với EJS
+      id: job.printnode_job_id,
+      jobAttemptId: job.job_attempt_id,
+      orderId: job.order_id,
+      productName: job.product_name,
+      variantTitle: job.variant_title,
+      sku: job.sku,
+      quantity: job.quantity, // Thêm quantity để hiển thị
+      price: job.price,       // Thêm price để hiển thị
+      status: job.status,
+      error: job.error_message,
+      timestamp: job.created_at
+    })),
     printerConfig: printerConfig
   });
 });
 
 // API endpoint to get current jobs (for dashboard auto-refresh)
 app.get('/api/jobs', (req, res) => {
-  const sortedJobs = [...printJobs].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-  res.json(sortedJobs);
+  const jobsFromDb = db.prepare('SELECT * FROM print_jobs ORDER BY created_at DESC LIMIT 100').all();
+  res.json(jobsFromDb.map(job => ({
+    id: job.printnode_job_id,
+    jobAttemptId: job.job_attempt_id,
+    orderId: job.order_id,
+    productName: job.product_name,
+    variantTitle: job.variant_title,
+    sku: job.sku,
+    quantity: job.quantity, // Thêm quantity
+    price: job.price,       // Thêm price
+    status: job.status,
+    error_message: job.error_message,
+    timestamp: job.created_at
+  })));
 });
 
 // PrintNode Webhook Receiver
@@ -241,166 +283,176 @@ app.get('/printnode-status', (req, res) => {
 
 // Shopify Webhook Handler
 app.post('/webhooks', async (req, res) => {
-  try {
-    const order = req.body;
-    const orderId = order.id;
-    const orderNumber = order.name || order.order_number;
-    const lineItems = order.line_items || [];
-    const currency = order.currency || 'VND';
-    const shippingAddress = order.shipping_address;
-    const customerName = order.customer ? `${order.customer.first_name} ${order.customer.last_name}` : null;
+  const order = req.body;
+  const orderNumber = order.name || order.order_number;
+  const lineItems = order.line_items || [];
+  const currency = order.currency || 'VND';
+  const shippingAddress = order.shipping_address;
+  const customerName = order.customer ? `${order.customer.first_name} ${order.customer.last_name}` : null;
 
-    console.log(`📦 Received order: ${orderNumber} (${orderId}) with ${lineItems.length} items`);
+  console.log(`📦 Received webhook for order: ${orderNumber}`);
 
-    // Prepare order info for PDF
-    const orderInfo = {
-      orderId,
-      orderNumber,
-      currency,
-      customerName,
-      shippingAddress,
-      note: order.note // Add note from order
-    };
+  // 1. KIỂM TRA IDEMPOTENCY: Đơn hàng này đã được xử lý chưa?
+  const checkStmt = db.prepare('SELECT id FROM print_jobs WHERE order_id = ?');
+  const existingJob = checkStmt.get(orderNumber);
 
-    // Process each line item - EACH ITEM GETS ITS OWN PDF
-    const printResults = [];
-    for (let i = 0; i < lineItems.length; i++) {
-      const item = lineItems[i];
-      
-      // Loop for the quantity of each item
-      for (let j = 0; j < item.quantity; j++) {
-        // Generate a unique ID for this specific print attempt, including the copy number
-        const jobAttemptId = `${orderNumber}-${item.id || i}-${j + 1}`;
-
-        try {
-          console.log(`🖨️  Processing item ${i + 1}/${lineItems.length} (Copy ${j + 1}/${item.quantity}): ${item.title}`);
-
-          // Create separate PDF for this product
-          const pdfBase64 = await createProductLabelPDF(item, orderInfo);
-
-          // Build title for print job
-          const printTitle = `${orderNumber} - ${item.title}${item.variant_title ? ' - ' + item.variant_title : ''} (${j + 1}/${item.quantity})`;
-
-          // Send to PrintNode - SEPARATE PRINT JOB
-          const printResponse = await sendToPrintNode(pdfBase64, printTitle);
-
-          const jobRecord = {
-            id: printResponse, // From PrintNode
-            jobAttemptId: jobAttemptId, // Our internal ID
-            orderId: orderNumber,
-            productName: item.title,
-            variantTitle: item.variant_title,
-            sku: item.sku,
-            quantity: item.quantity, // Keep original quantity for info
-            status: 'sent',
-            timestamp: new Date().toISOString()
-          };
-
-          printJobs.unshift(jobRecord);
-          printResults.push(jobRecord);
-
-          console.log(`✅ Print job for ${item.title} (Copy ${j + 1}) sent successfully (Job ID: ${printResponse})`);
-          
-          // Small delay between EACH print to avoid overwhelming the printer
-          await new Promise(resolve => setTimeout(resolve, 500));
-          
-        } catch (error) {
-          console.error(`❌ Failed to print item ${i + 1} (${item.title}), Copy ${j + 1}:`, error.message);
-          const failedJobRecord = {
-            id: null, // No PrintNode ID on failure
-            jobAttemptId: jobAttemptId, // Our internal ID
-            orderId: orderNumber,
-            productName: item.title,
-            variantTitle: item.variant_title,
-            sku: item.sku,
-            status: 'failed',
-            error: error.message,
-            timestamp: new Date().toISOString(),
-            // Store data needed for retry
-            retryData: {
-              item: item,
-              orderInfo: orderInfo
-            }
-          };
-          printJobs.unshift(failedJobRecord);
-          printResults.push(failedJobRecord);
-        }
-      }
-    }
-
-    // Keep only last 100 jobs
-    if (printJobs.length > 100) {
-      printJobs = printJobs.slice(0, 100);
-    }
-
-    console.log(`✅ Order ${orderNumber} completed: ${printResults.filter(r => r.status === 'sent').length}/${lineItems.length} items printed successfully`);
-
-    res.status(200).json({
-      success: true,
-      message: `Processed ${lineItems.length} items from order ${orderNumber}`,
-      printed: printResults.filter(r => r.status === 'sent').length,
-      failed: printResults.filter(r => r.status === 'failed').length,
-      results: printResults
-    });
-
-  } catch (error) {
-    console.error('❌ Webhook processing error:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+  if (existingJob) {
+    console.log(`⚠️ Order ${orderNumber} already processed. Ignoring duplicate webhook.`);
+    // Trả lời OK ngay lập tức để Shopify không gửi lại
+    return res.status(200).json({ success: true, message: 'Duplicate webhook ignored.' });
   }
+
+  // 2. TRẢ LỜI SHOPIFY NGAY LẬP TỨC
+  res.status(200).json({
+    success: true,
+    message: `Order ${orderNumber} accepted and queued for printing.`
+  });
+
+  // 3. BẮT ĐẦU XỬ LÝ TRONG NỀN (không await)
+  processOrderInBackground(order);
+
 });
+
+// Hàm xử lý nền
+async function processOrderInBackground(order) {
+  const orderNumber = order.name || order.order_number;
+  const lineItems = order.line_items || [];
+  
+  console.log(`⚙️  Starting background processing for order ${orderNumber}`);
+
+  const orderInfo = {
+    orderId: order.id,
+    orderNumber: orderNumber,
+    currency: order.currency,
+    customerName: order.customer ? `${order.customer.first_name} ${order.customer.last_name}` : null,
+    shippingAddress: order.shipping_address,
+    note: order.note
+  };
+
+  const insertJobStmt = db.prepare(`
+    INSERT INTO print_jobs (job_attempt_id, order_id, product_name, variant_title, sku, quantity, price, status, error_message, retry_data)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const updateSuccessStmt = db.prepare('UPDATE print_jobs SET status = ?, printnode_job_id = ? WHERE job_attempt_id = ?');
+  const updateErrorStmt = db.prepare('UPDATE print_jobs SET status = ?, error_message = ? WHERE job_attempt_id = ?');
+
+  for (const item of lineItems) {
+    for (let j = 0; j < item.quantity; j++) {
+      const jobAttemptId = `${orderNumber}-${item.id || 'no-id'}-${j + 1}`;
+      
+      // Ban đầu, lưu job vào CSDL với trạng thái 'pending'
+      const retryData = JSON.stringify({ item, orderInfo });
+      insertJobStmt.run(jobAttemptId, orderNumber, item.title, item.variant_title, item.sku, item.quantity, item.price, 'pending', null, retryData);
+
+      try {
+        console.log(`🖨️  Processing item (Copy ${j + 1}/${item.quantity}): ${item.title}`);
+
+        const pdfBase64 = await createProductLabelPDF(item, orderInfo);
+        const printTitle = `${orderNumber} - ${item.title}${item.variant_title ? ' - ' + item.variant_title : ''} (${j + 1}/${item.quantity})`;
+        const printResponse = await sendToPrintNode(pdfBase64, printTitle);
+
+        // Cập nhật CSDL khi thành công
+        updateSuccessStmt.run('sent', printResponse, jobAttemptId);
+        console.log(`✅ Print job for ${item.title} (Copy ${j + 1}) sent successfully (Job ID: ${printResponse})`);
+
+      } catch (error) {
+        console.error(`❌ Failed to print item ${item.title}, Copy ${j + 1}:`, error.message);
+        // Cập nhật CSDL khi thất bại
+        updateErrorStmt.run('failed', error.message, jobAttemptId);
+      }
+      
+      // Vẫn giữ độ trễ để không làm quá tải máy in
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  }
+  console.log(`✅ Finished background processing for order ${orderNumber}`);
+}
+
 
 // API endpoint to retry a failed job
 app.post('/api/retry-job/:jobAttemptId', async (req, res) => {
   const { jobAttemptId } = req.params;
-  const jobToRetry = printJobs.find(job => job.jobAttemptId === jobAttemptId);
+  
+  // Lấy job gốc từ CSDL để lấy dữ liệu retry
+  const originalJob = db.prepare('SELECT * FROM print_jobs WHERE job_attempt_id = ?').get(jobAttemptId);
 
-  if (!jobToRetry) {
+  if (!originalJob) {
     return res.status(404).json({ success: false, message: 'Job not found.' });
   }
 
-  if (jobToRetry.status !== 'failed') {
-    return res.status(400).json({ success: false, message: 'Job is not in a failed state.' });
-  }
+  // Bỏ kiểm tra status, cho phép retry bất kỳ job nào
+  // if (originalJob.status !== 'failed') {
+  //   return res.status(400).json({ success: false, message: 'Job is not in a failed state.' });
+  // }
 
-  if (!jobToRetry.retryData) {
+  if (!originalJob.retry_data) {
     return res.status(400).json({ success: false, message: 'No retry data available for this job.' });
   }
 
   try {
-    const { item, orderInfo } = jobToRetry.retryData;
-    console.log(`🔁 Retrying print for: ${item.title}`);
+    const { item, orderInfo } = JSON.parse(originalJob.retry_data);
+    console.log(`🔁 Retrying print for: ${item.title} from Order ${orderInfo.orderNumber}`);
 
     // 1. Re-create PDF
     const pdfBase64 = await createProductLabelPDF(item, orderInfo);
 
     // 2. Re-build title
-    const printTitle = `${orderInfo.orderNumber} - ${item.title}${item.variantTitle ? ' - ' + item.variantTitle : ''}`;
+    const printTitle = `[RETRY] ${orderInfo.orderNumber} - ${item.title}${item.variant_title ? ' - ' + item.variant_title : ''}`;
 
     // 3. Send to PrintNode
     const printResponse = await sendToPrintNode(pdfBase64, printTitle);
 
-    // 4. Update job record on success
-    jobToRetry.id = printResponse; // New PrintNode ID
-    jobToRetry.status = 'sent';
-    jobToRetry.timestamp = new Date().toISOString();
-    jobToRetry.error = null;
-    delete jobToRetry.retryData; // Clean up retry data
+    // 4. TẠO MỘT BẢN GHI JOB MỚI cho lần retry này
+    const newJobAttemptId = `${originalJob.job_attempt_id}-retry-${Date.now()}`;
+    
+    db.prepare(`
+      INSERT INTO print_jobs (
+        job_attempt_id, printnode_job_id, order_id, product_name, 
+        variant_title, sku, quantity, price, status, retry_data
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      newJobAttemptId,
+      printResponse,
+      orderInfo.orderNumber,
+      item.title,
+      item.variant_title,
+      item.sku,
+      item.quantity,
+      item.price,
+      'sent', // Trạng thái của job mới là 'sent'
+      originalJob.retry_data // Vẫn lưu lại retry_data để có thể retry tiếp
+    );
 
-    console.log(`✅ Retry successful! New PrintNode Job ID: ${printResponse}`);
+    console.log(`✅ Retry successful! New PrintNode Job ID: ${printResponse}, New DB Job ID: ${newJobAttemptId}`);
 
     res.json({
       success: true,
-      message: 'Job successfully retried.',
-      job: jobToRetry
+      message: 'Job successfully retried as a new print job.'
     });
 
   } catch (error) {
-    // 5. Update job record on another failure
-    jobToRetry.error = error.message;
-    jobToRetry.timestamp = new Date().toISOString();
+    // Nếu retry thất bại, chúng ta cũng tạo một bản ghi mới với trạng thái 'failed'
+    const newJobAttemptId = `${originalJob.job_attempt_id}-retry-fail-${Date.now()}`;
+    const { item, orderInfo } = JSON.parse(originalJob.retry_data);
+
+    db.prepare(`
+      INSERT INTO print_jobs (
+        job_attempt_id, order_id, product_name, variant_title, 
+        sku, quantity, price, status, error_message, retry_data
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      newJobAttemptId,
+      orderInfo.orderNumber,
+      item.title,
+      item.variant_title,
+      item.sku,
+      item.quantity,
+      item.price,
+      'failed',
+      error.message,
+      originalJob.retry_data
+    );
+      
     console.error(`❌ Retry failed for job ${jobAttemptId}:`, error.message);
     res.status(500).json({ success: false, message: 'Failed to retry job.', error: error.message });
   }
