@@ -3,24 +3,48 @@ const PDFDocument = require('pdfkit');
 const axios = require('axios');
 const path = require('path');
 const mongoose = require('mongoose');
-const pLimit = require('p-limit').default; // SỬA DÒNG NÀY
+// const pLimit = require('p-limit').default; // BƯỚC 1: XÓA DÒNG NÀY
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 2. Khởi tạo p-limit với giới hạn concurrency
-// Con số này có nghĩa là: tại bất kỳ thời điểm nào, chỉ có tối đa 3 lệnh in được gửi đến PrintNode cùng lúc.
-// Bạn có thể điều chỉnh con số này (2, 3, 4, 5) tùy thuộc vào khả năng của máy in.
-const limit = pLimit(3); 
+// Khai báo limit ở đây, sẽ được khởi tạo trong hàm startServer
+let limit;
 
-// --- KẾT NỐI MONGODB VÀ KHỞI ĐỘNG SERVER ---
-// Thay đổi lớn: Chúng ta sẽ chỉ khởi động server SAU KHI kết nối DB thành công.
+// --- BƯỚC 2: TẠO HÀM KHỞI ĐỘNG BẤT ĐỒNG BỘ ---
+async function startServer() {
+  try {
+    // Sử dụng import() động để tải ES Module
+    const pLimitModule = await import('p-limit');
+    const pLimit = pLimitModule.default;
+
+    // Khởi tạo limit sau khi đã import thành công
+    limit = pLimit(3);
+    console.log('✅ p-limit loaded successfully.');
+
+    // Kết nối tới MongoDB
+    await mongoose.connect(process.env.MONGODB_URI);
+    console.log('✅ MongoDB connected successfully.');
+
+    // Chỉ khi mọi thứ sẵn sàng, chúng ta mới cho server lắng nghe request
+    app.listen(PORT, () => {
+      console.log(`🚀 Server running on http://localhost:${PORT}`);
+    });
+
+  } catch (err) {
+    console.error('❌ Server startup failed:', err.message);
+    console.error('👉 Please ensure all dependencies are loaded and configurations are correct.');
+    process.exit(1); // Thoát ứng dụng nếu khởi động thất bại
+  }
+}
+
+// --- BƯỚC 3: XÓA KHỐI KẾT NỐI CŨ ---
+/*
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => {
     console.log('✅ MongoDB connected successfully.');
     
-    // Chỉ khi kết nối thành công, chúng ta mới cho server lắng nghe request
     app.listen(PORT, () => {
       console.log(`🚀 Server running on http://localhost:${PORT}`);
     });
@@ -29,9 +53,9 @@ mongoose.connect(process.env.MONGODB_URI)
   .catch(err => {
     console.error('❌ MongoDB connection error:', err.message);
     console.error('👉 Please ensure MongoDB is running and the MONGODB_URI in your .env file is correct.');
-    process.exit(1); // Thoát ứng dụng nếu không kết nối được DB
+    process.exit(1); 
   });
-
+*/
 
 // --- 3. ĐỊNH NGHĨA MONGOOSE SCHEMAS VÀ MODELS ---
 const PrintJobSchema = new mongoose.Schema({
@@ -352,3 +376,6 @@ app.get('/health', (req, res) => {
 // app.listen(PORT, () => {
 //   console.log(`🚀 Server running on http://localhost:${PORT}`);
 // });
+
+// --- BƯỚC 4: GỌI HÀM KHỞI ĐỘNG Ở CUỐI FILE ---
+startServer();
