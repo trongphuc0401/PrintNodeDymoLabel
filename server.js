@@ -166,25 +166,34 @@ async function sendToPrintNode(pdfBase64, title) {
 
 // Dashboard Route
 app.get('/', async (req, res) => {
-  const jobsFromDb = await PrintJob.find().sort({ created_at: -1 }).limit(100);
-  const printerConfig = { printerId: PRINTER_ID, apiConfigured: !!PRINTNODE_API_KEY };
+  try {
+    const jobsFromDb = await PrintJob.find().sort({ created_at: -1 }).limit(100);
+    
+    // THÊM DÒNG NÀY ĐỂ KIỂM TRA
+    console.log(`Found ${jobsFromDb.length} jobs in the database.`);
 
-  res.render('dashboard', {
-    printJobs: jobsFromDb.map(job => ({
-      id: job.printnode_job_id,
-      jobAttemptId: job.job_attempt_id,
-      orderId: job.order_id,
-      productName: job.product_name,
-      variantTitle: job.variant_title,
-      sku: job.sku,
-      quantity: job.quantity,
-      price: job.price,
-      status: job.status,
-      error: job.error_message,
-      timestamp: job.created_at
-    })),
-    printerConfig: printerConfig
-  });
+    const printerConfig = { printerId: PRINTER_ID, apiConfigured: !!PRINTNODE_API_KEY };
+
+    res.render('dashboard', {
+      printJobs: jobsFromDb.map(job => ({
+        id: job.printnode_job_id,
+        jobAttemptId: job.job_attempt_id,
+        orderId: job.order_id,
+        productName: job.product_name,
+        variantTitle: job.variant_title,
+        sku: job.sku,
+        quantity: job.quantity,
+        price: job.price,
+        status: job.status,
+        error: job.error_message,
+        timestamp: job.created_at
+      })),
+      printerConfig: printerConfig
+    });
+  } catch (error) {
+    console.error("❌ Error fetching jobs for dashboard:", error);
+    res.status(500).send("Error loading dashboard data. Check server logs.");
+  }
 });
 
 // API endpoint to get current jobs
@@ -324,13 +333,19 @@ app.post('/api/retry-job/:jobAttemptId', async (req, res) => {
     const printTitle = `[RETRY] ${orderInfo.orderNumber} - ${item.title}${item.variant_title ? ' - ' + item.variant_title : ''}`;
     const printResponse = await sendToPrintNode(pdfBase64, printTitle);
 
-    // Tạo một bản ghi job MỚI cho lần retry
+    // Tạo một bản ghi job MỚI cho lần retry với ĐẦY ĐỦ thông tin
     const newJobAttemptId = `${originalJob.job_attempt_id}-retry-${Date.now()}`;
     await PrintJob.create({
-      job_attempt_id: newJobAttemptId, // ID mới
-      printnode_job_id: printResponse, // ID mới từ PrintNode
+      job_attempt_id: newJobAttemptId,
+      printnode_job_id: printResponse,
+      order_id: orderInfo.orderNumber,
+      product_name: item.title,
+      variant_title: item.variant_title,
+      sku: item.sku,
+      quantity: item.quantity,
+      price: item.price,
       status: 'sent',
-      // ... các thông tin khác
+      retry_data: originalJob.retry_data // Vẫn lưu lại retry_data để có thể retry tiếp
     });
 
     console.log(`✅ Retry successful! New PrintNode Job ID: ${printResponse}, New DB Job ID: ${newJobAttemptId}`);
