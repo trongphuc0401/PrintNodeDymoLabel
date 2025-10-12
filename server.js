@@ -114,8 +114,13 @@ const PrintNodeEvent = mongoose.model('PrintNodeEvent', PrintNodeEventSchema);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static('public'));
 app.set('view engine', 'ejs');
-app.set('views', path.join(__dirname, './'));
 
+// SỬA DÒNG NÀY:
+// Thay vì trỏ vào thư mục gốc, hãy trỏ vào thư mục 'views' theo chuẩn
+app.set('views', path.join(__dirname, 'views'));
+
+
+// --- 4. CẬP NHẬT CÁC ROUTE ĐỂ DÙNG MONGOOSE ---
 // Middleware: Wait for MongoDB connection before processing requests
 app.use(async (req, res, next) => {
   if (mongoose.connection.readyState === 1) {
