@@ -3,7 +3,7 @@ const PDFDocument = require('pdfkit');
 const axios = require('axios');
 const path = require('path');
 const mongoose = require('mongoose');
-// const pLimit = require('p-limit').default; // BƯỚC 1: XÓA DÒNG NÀY
+const pLimit = require('p-limit').default; // Quay lại sử dụng require trực tiếp
 require('dotenv').config();
 
 const app = express();
@@ -21,54 +21,14 @@ const logger = {
   error: console.error, // Luôn log lỗi
 };
 
+// Khởi tạo p-limit trực tiếp
+const limit = pLimit(3);
 
-// Khai báo limit ở đây, sẽ được khởi tạo trong hàm startServer
-let limit;
-
-// --- BƯỚC 2: TẠO HÀM KHỞI ĐỘNG BẤT ĐỒNG BỘ ---
-async function startServer() {
-  try {
-    // Sử dụng import() động để tải ES Module
-    const pLimitModule = await import('p-limit');
-    const pLimit = pLimitModule.default;
-
-    // Khởi tạo limit sau khi đã import thành công
-    limit = pLimit(3);
-    logger.info('✅ p-limit loaded successfully.');
-
-    // Kết nối tới MongoDB
-    await mongoose.connect(process.env.MONGODB_URI);
-    logger.info('✅ MongoDB connected successfully.');
-
-    // Chỉ khi mọi thứ sẵn sàng, chúng ta mới cho server lắng nghe request
-    app.listen(PORT, () => {
-      logger.info(`🚀 Server running on http://localhost:${PORT}`);
-    });
-
-  } catch (err) {
-    logger.error('❌ Server startup failed:', err.message);
-    logger.error('👉 Please ensure all dependencies are loaded and configurations are correct.');
-    process.exit(1); // Thoát ứng dụng nếu khởi động thất bại
-  }
-}
-
-// --- BƯỚC 3: XÓA KHỐI KẾT NỐI CŨ ---
-/*
+// --- KẾT NỐI MONGODB ---
+// Mongoose sẽ tự động đệm các thao tác cho đến khi kết nối thành công
 mongoose.connect(process.env.MONGODB_URI)
-  .then(() => {
-    console.log('✅ MongoDB connected successfully.');
-    
-    app.listen(PORT, () => {
-      console.log(`🚀 Server running on http://localhost:${PORT}`);
-    });
-
-  })
-  .catch(err => {
-    console.error('❌ MongoDB connection error:', err.message);
-    console.error('👉 Please ensure MongoDB is running and the MONGODB_URI in your .env file is correct.');
-    process.exit(1); 
-  });
-*/
+  .then(() => logger.info('✅ MongoDB connection initiated.'))
+  .catch(err => logger.error('❌ MongoDB initial connection error:', err.message));
 
 // --- 3. ĐỊNH NGHĨA MONGOOSE SCHEMAS VÀ MODELS ---
 const PrintJobSchema = new mongoose.Schema({
@@ -397,13 +357,14 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString(), apiConfigured: !!PRINTNODE_API_KEY });
 });
 
-/*
-  Dòng app.listen() ở cuối file sẽ được di chuyển lên trên,
-  vào bên trong .then() của mongoose.connect()
-*/
-// app.listen(PORT, () => {
-//   console.log(`🚀 Server running on http://localhost:${PORT}`);
-// });
+// --- KHỞI ĐỘNG SERVER (CHO MÔI TRƯỜNG LOCAL/PM2) ---
+// Đoạn code này sẽ kiểm tra xem tệp có được chạy trực tiếp hay không
+if (require.main === module) {
+  app.listen(PORT, () => {
+    logger.info(`🚀 Server running for local/PM2 on http://localhost:${PORT}`);
+  });
+}
 
-// --- BƯỚC 4: GỌI HÀM KHỞI ĐỘNG Ở CUỐI FILE ---
-startServer();
+// --- XUẤT APP (CHO MÔI TRƯỜNG SERVERLESS) ---
+// Luôn xuất đối tượng app để các nền tảng như Vercel có thể sử dụng
+module.exports = app;
