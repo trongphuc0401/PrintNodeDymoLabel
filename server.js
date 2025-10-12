@@ -387,10 +387,38 @@ app.get('/health', (req, res) => {
 });
 
 // --- KHỞI ĐỘNG SERVER ---
+let isServerRunning = false;
+
+async function startServer() {
+  if (isServerRunning) return;
+  
+  // Đợi MongoDB connected
+  const maxAttempts = 30; // 30 giây
+  let attempts = 0;
+  
+  while (mongoose.connection.readyState !== 1 && attempts < maxAttempts) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    attempts++;
+    logger.log(`⏳ Waiting for MongoDB... (${attempts}/${maxAttempts})`);
+  }
+  
+  if (mongoose.connection.readyState !== 1) {
+    logger.error('❌ MongoDB connection failed after 30 seconds. Starting server anyway...');
+  } else {
+    logger.info('✅ MongoDB connected successfully!');
+  }
+  
+  isServerRunning = true;
+  
+  if (require.main === module) {
+    app.listen(PORT, () => {
+      logger.info(`🚀 Server running for local/PM2 on http://localhost:${PORT}`);
+    });
+  }
+}
+
 if (require.main === module) {
-  app.listen(PORT, () => {
-    logger.info(`🚀 Server running for local/PM2 on http://localhost:${PORT}`);
-  });
+  startServer();
 }
 
 // --- XUẤT APP (CHO SERVERLESS) ---
