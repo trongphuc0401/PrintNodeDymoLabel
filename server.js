@@ -52,16 +52,34 @@ function createLimit(concurrency) {
 const limit = createLimit(3);
 
 // --- KẾT NỐI MONGODB ---
-mongoose.connect(process.env.MONGODB_URI, {
-  serverSelectionTimeoutMS: 5000,
-  socketTimeoutMS: 45000,
-  connectTimeoutMS: 10000,
-  retryWrites: true,
-  maxPoolSize: 10,
-  minPoolSize: 5
-})
-  .then(() => logger.info('✅ MongoDB connection established.'))
-  .catch(err => logger.error('❌ MongoDB connection error:', err.message));
+const mongoUri = process.env.MONGODB_URI;
+
+logger.info('🔍 MongoDB URI check:', mongoUri ? '✅ Set' : '❌ NOT SET');
+
+if (!mongoUri) {
+  logger.error('❌ CRITICAL: MONGODB_URI environment variable is not set!');
+}
+
+const connectMongo = async () => {
+  try {
+    await mongoose.connect(mongoUri, {
+      serverSelectionTimeoutMS: 10000,
+      socketTimeoutMS: 45000,
+      connectTimeoutMS: 15000,
+      retryWrites: true,
+      maxPoolSize: 10,
+      family: 4 // Force IPv4
+    });
+    logger.info('✅ MongoDB connection established successfully');
+    return true;
+  } catch (err) {
+    logger.error('❌ MongoDB connection error:', err.message);
+    return false;
+  }
+};
+
+// Initial connection
+connectMongo();
 
 // Log connection events
 mongoose.connection.on('connected', () => logger.info('✅ Mongoose connected to MongoDB'));
