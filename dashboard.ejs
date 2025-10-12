@@ -375,10 +375,13 @@
                       <% } %>
                   </td>
                   <td data-label="Actions">
-                    <button class="retry-btn" onclick="retryJob(event, '<%= job.jobAttemptId %>')"
-                      title="In lại job này">
-                      🔄 In lại
-                    </button>
+                    <%# Chỉ hiển thị nút nếu jobAttemptId tồn tại %>
+                      <% if (job.jobAttemptId) { %>
+                        <button class="retry-btn" onclick="retryJob(event, '<%= job.jobAttemptId %>')"
+                          title="In lại job này">
+                          🔄 In lại
+                        </button>
+                        <% } %>
                   </td>
                 </tr>
                 <% }); %>
@@ -397,7 +400,7 @@
     }
 
     // Hàm để gọi API retry
-    async function retryJob(event, jobAttemptId) { // SỬA: Thêm 'event' vào tham số
+    async function retryJob(event, jobAttemptId) { // Đảm bảo có 'event'
       const button = event.target;
       const originalText = button.innerHTML;
       button.disabled = true;
@@ -407,17 +410,24 @@
         const response = await fetch(`/api/retry-job/${jobAttemptId}`, {
           method: 'POST',
         });
+
+        // Cố gắng parse JSON, nếu thất bại (vì server trả về HTML), sẽ nhảy vào catch
         const result = await response.json();
+
         if (!response.ok) {
-          throw new Error(result.message || 'Unknown error');
+          // Nếu server trả về lỗi (4xx, 5xx) nhưng vẫn là JSON
+          throw new Error(result.message || 'Lỗi không xác định từ server.');
         }
+
         alert('Thành công! Lệnh in lại đã được gửi đi.');
-        // Tự động refresh sau 1 giây để xem job mới
         setTimeout(() => {
           window.location.reload();
         }, 1000);
+
       } catch (error) {
+        // Catch này sẽ bắt cả lỗi mạng, lỗi parse JSON, và lỗi logic ở trên
         console.error('Retry failed:', error);
+        // Hiển thị thông báo lỗi cụ thể hơn
         alert(`Thất bại: ${error.message}`);
         button.disabled = false;
         button.innerHTML = originalText;

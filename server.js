@@ -3,24 +3,61 @@ const PDFDocument = require('pdfkit');
 const axios = require('axios');
 const path = require('path');
 const mongoose = require('mongoose');
-const pLimit = require('p-limit').default; // SỬA DÒNG NÀY
+// const pLimit = require('p-limit').default; // BƯỚC 1: XÓA DÒNG NÀY
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 2. Khởi tạo p-limit với giới hạn concurrency
-// Con số này có nghĩa là: tại bất kỳ thời điểm nào, chỉ có tối đa 3 lệnh in được gửi đến PrintNode cùng lúc.
-// Bạn có thể điều chỉnh con số này (2, 3, 4, 5) tùy thuộc vào khả năng của máy in.
-const limit = pLimit(3); 
+// --- TỐI ƯU HÓA: TẠO LOGGER ĐƠN GIẢN ---
+const logger = {
+  log: (...args) => {
+    // Chỉ log chi tiết khi không ở môi trường production
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(...args);
+    }
+  },
+  info: console.log, // Luôn log các thông tin quan trọng
+  error: console.error, // Luôn log lỗi
+};
 
-// --- KẾT NỐI MONGODB VÀ KHỞI ĐỘNG SERVER ---
-// Thay đổi lớn: Chúng ta sẽ chỉ khởi động server SAU KHI kết nối DB thành công.
+
+// Khai báo limit ở đây, sẽ được khởi tạo trong hàm startServer
+let limit;
+
+// --- BƯỚC 2: TẠO HÀM KHỞI ĐỘNG BẤT ĐỒNG BỘ ---
+async function startServer() {
+  try {
+    // Sử dụng import() động để tải ES Module
+    const pLimitModule = await import('p-limit');
+    const pLimit = pLimitModule.default;
+
+    // Khởi tạo limit sau khi đã import thành công
+    limit = pLimit(3);
+    logger.info('✅ p-limit loaded successfully.');
+
+    // Kết nối tới MongoDB
+    await mongoose.connect(process.env.MONGODB_URI);
+    logger.info('✅ MongoDB connected successfully.');
+
+    // Chỉ khi mọi thứ sẵn sàng, chúng ta mới cho server lắng nghe request
+    app.listen(PORT, () => {
+      logger.info(`🚀 Server running on http://localhost:${PORT}`);
+    });
+
+  } catch (err) {
+    logger.error('❌ Server startup failed:', err.message);
+    logger.error('👉 Please ensure all dependencies are loaded and configurations are correct.');
+    process.exit(1); // Thoát ứng dụng nếu khởi động thất bại
+  }
+}
+
+// --- BƯỚC 3: XÓA KHỐI KẾT NỐI CŨ ---
+/*
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => {
     console.log('✅ MongoDB connected successfully.');
     
-    // Chỉ khi kết nối thành công, chúng ta mới cho server lắng nghe request
     app.listen(PORT, () => {
       console.log(`🚀 Server running on http://localhost:${PORT}`);
     });
@@ -29,9 +66,9 @@ mongoose.connect(process.env.MONGODB_URI)
   .catch(err => {
     console.error('❌ MongoDB connection error:', err.message);
     console.error('👉 Please ensure MongoDB is running and the MONGODB_URI in your .env file is correct.');
-    process.exit(1); // Thoát ứng dụng nếu không kết nối được DB
+    process.exit(1); 
   });
-
+*/
 
 // --- 3. ĐỊNH NGHĨA MONGOOSE SCHEMAS VÀ MODELS ---
 const PrintJobSchema = new mongoose.Schema({
@@ -82,7 +119,7 @@ async function createProductLabelPDF(orderItem, orderInfo) {
         doc.registerFont('Roboto-Regular', path.join(__dirname, 'fonts', 'Roboto-Regular.ttf'));
         doc.registerFont('Roboto-Italic', path.join(__dirname, 'fonts', 'Roboto-Italic.ttf'));
       } catch (fontError) {
-        console.error('Lỗi đăng ký font:', fontError.message);
+        logger.error('Lỗi đăng ký font:', fontError.message);
         doc.font('Helvetica-Bold'); 
       }
       const chunks = [];
@@ -133,7 +170,7 @@ async function sendToPrintNode(pdfBase64, title) {
     );
     return response.data;
   } catch (error) {
-    console.error('PrintNode Error:', error.response?.data || error.message);
+    logger.error('PrintNode Error:', error.response?.data || error.message);
     throw error;
   }
 }
@@ -142,25 +179,34 @@ async function sendToPrintNode(pdfBase64, title) {
 
 // Dashboard Route
 app.get('/', async (req, res) => {
-  const jobsFromDb = await PrintJob.find().sort({ created_at: -1 }).limit(100);
-  const printerConfig = { printerId: PRINTER_ID, apiConfigured: !!PRINTNODE_API_KEY };
+  try {
+    const jobsFromDb = await PrintJob.find().sort({ created_at: -1 }).limit(100);
+    
+    // THÊM DÒNG NÀY ĐỂ KIỂM TRA
+    logger.log(`Found ${jobsFromDb.length} jobs in the database.`);
 
-  res.render('dashboard', {
-    printJobs: jobsFromDb.map(job => ({
-      id: job.printnode_job_id,
-      jobAttemptId: job.job_attempt_id,
-      orderId: job.order_id,
-      productName: job.product_name,
-      variantTitle: job.variant_title,
-      sku: job.sku,
-      quantity: job.quantity,
-      price: job.price,
-      status: job.status,
-      error: job.error_message,
-      timestamp: job.created_at
-    })),
-    printerConfig: printerConfig
-  });
+    const printerConfig = { printerId: PRINTER_ID, apiConfigured: !!PRINTNODE_API_KEY };
+
+    res.render('dashboard', {
+      printJobs: jobsFromDb.map(job => ({
+        id: job.printnode_job_id,
+        jobAttemptId: job.job_attempt_id,
+        orderId: job.order_id,
+        productName: job.product_name,
+        variantTitle: job.variant_title,
+        sku: job.sku,
+        quantity: job.quantity,
+        price: job.price,
+        status: job.status,
+        error: job.error_message,
+        timestamp: job.created_at
+      })),
+      printerConfig: printerConfig
+    });
+  } catch (error) {
+    logger.error("❌ Error fetching jobs for dashboard:", error);
+    res.status(500).send("Error loading dashboard data. Check server logs.");
+  }
 });
 
 // API endpoint to get current jobs
@@ -178,7 +224,7 @@ app.post('/printnode-webhook', async (req, res) => {
 
   const events = req.body;
   if (Array.isArray(events)) {
-    console.log(`🔔 Received ${events.length} event(s) from PrintNode webhook.`);
+    logger.info(`🔔 Received ${events.length} event(s) from PrintNode webhook.`);
     const eventDocs = events.map(e => ({ event_type: e.event, content: e }));
     await PrintNodeEvent.insertMany(eventDocs);
   }
@@ -198,11 +244,11 @@ app.get('/printnode-status', async (req, res) => {
 app.post('/webhooks', async (req, res) => {
   const order = req.body;
   const orderNumber = order.name || order.order_number;
-  console.log(`📦 Received webhook for order: ${orderNumber}`);
+  logger.info(`📦 Received webhook for order: ${orderNumber}`);
 
   const existingJob = await PrintJob.findOne({ order_id: orderNumber });
   if (existingJob) {
-    console.log(`⚠️ Order ${orderNumber} already processed. Ignoring duplicate webhook.`);
+    logger.log(`⚠️ Order ${orderNumber} already processed. Ignoring duplicate webhook.`);
     return res.status(200).json({ success: true, message: 'Duplicate webhook ignored.' });
   }
 
@@ -214,7 +260,7 @@ app.post('/webhooks', async (req, res) => {
 async function processOrderInBackground(order) {
   const orderNumber = order.name || order.order_number;
   const lineItems = order.line_items || [];
-  console.log(`⚙️  Starting background processing for order ${orderNumber}`);
+  logger.info(`⚙️  Starting background processing for order ${orderNumber}`);
 
   const orderInfo = {
     orderId: order.id,
@@ -251,7 +297,7 @@ async function processOrderInBackground(order) {
         await newJob.save();
 
         try {
-          console.log(`🖨️  Processing item (Copy ${j + 1}/${item.quantity}): ${item.title}`);
+          logger.log(`🖨️  Processing item (Copy ${j + 1}/${item.quantity}): ${item.title}`);
           const pdfBase64 = await createProductLabelPDF(item, orderInfo);
           const printTitle = `${orderNumber} - ${item.title}${item.variant_title ? ' - ' + item.variant_title : ''} (${j + 1}/${item.quantity})`;
           const printResponse = await sendToPrintNode(pdfBase64, printTitle);
@@ -260,9 +306,9 @@ async function processOrderInBackground(order) {
           newJob.status = 'sent';
           newJob.printnode_job_id = printResponse;
           await newJob.save();
-          console.log(`✅ Print job for ${item.title} (Copy ${j + 1}) sent successfully (Job ID: ${printResponse})`);
+          logger.log(`✅ Print job for ${item.title} (Copy ${j + 1}) sent successfully (Job ID: ${printResponse})`);
         } catch (error) {
-          console.error(`❌ Failed to print item ${item.title}, Copy ${j + 1}:`, error.message);
+          logger.error(`❌ Failed to print item ${item.title}, Copy ${j + 1}:`, error.message);
           // Cập nhật khi thất bại
           newJob.status = 'failed';
           newJob.error_message = error.message;
@@ -276,10 +322,10 @@ async function processOrderInBackground(order) {
   // 5. Chạy tất cả các tác vụ trong hàng đợi
   try {
     await Promise.all(printTasks);
-    console.log(`✅ Finished all tasks for order ${orderNumber}`);
+    logger.info(`✅ Finished all tasks for order ${orderNumber}`);
   } catch (error) {
     // Lỗi này thường không xảy ra vì chúng ta đã bắt lỗi bên trong mỗi task
-    console.error(`🚨 An unexpected error occurred while processing the print queue for order ${orderNumber}:`, error);
+    logger.error(`🚨 An unexpected error occurred while processing the print queue for order ${orderNumber}:`, error);
   }
 }
 
@@ -294,25 +340,31 @@ app.post('/api/retry-job/:jobAttemptId', async (req, res) => {
 
   try {
     const { item, orderInfo } = JSON.parse(originalJob.retry_data);
-    console.log(`🔁 Retrying print for: ${item.title} from Order ${orderInfo.orderNumber}`);
+    logger.info(`🔁 Retrying print for: ${item.title} from Order ${orderInfo.orderNumber}`);
 
     const pdfBase64 = await createProductLabelPDF(item, orderInfo);
     const printTitle = `[RETRY] ${orderInfo.orderNumber} - ${item.title}${item.variant_title ? ' - ' + item.variant_title : ''}`;
     const printResponse = await sendToPrintNode(pdfBase64, printTitle);
 
-    // Tạo một bản ghi job MỚI cho lần retry
+    // Tạo một bản ghi job MỚI cho lần retry với ĐẦY ĐỦ thông tin
     const newJobAttemptId = `${originalJob.job_attempt_id}-retry-${Date.now()}`;
     await PrintJob.create({
-      job_attempt_id: newJobAttemptId, // ID mới
-      printnode_job_id: printResponse, // ID mới từ PrintNode
+      job_attempt_id: newJobAttemptId,
+      printnode_job_id: printResponse,
+      order_id: orderInfo.orderNumber,
+      product_name: item.title,
+      variant_title: item.variant_title,
+      sku: item.sku,
+      quantity: item.quantity,
+      price: item.price,
       status: 'sent',
-      // ... các thông tin khác
+      retry_data: originalJob.retry_data // Vẫn lưu lại retry_data để có thể retry tiếp
     });
 
-    console.log(`✅ Retry successful! New PrintNode Job ID: ${printResponse}, New DB Job ID: ${newJobAttemptId}`);
+    logger.info(`✅ Retry successful! New PrintNode Job ID: ${printResponse}, New DB Job ID: ${newJobAttemptId}`);
     res.json({ success: true, message: 'Job successfully retried as a new print job.' });
   } catch (error) {
-    console.error(`❌ Retry failed for job ${jobAttemptId}:`, error.message);
+    logger.error(`❌ Retry failed for job ${jobAttemptId}:`, error.message);
     res.status(500).json({ success: false, message: 'Failed to retry job.', error: error.message });
   }
 });
@@ -326,7 +378,7 @@ app.post('/api/test-print', async (req, res) => {
     const results = [];
     for (let i = 0; i < testItems.length; i++) {
       const item = testItems[i];
-      console.log(`Testing print ${i + 1}/${testItems.length}: ${item.title}`);
+      logger.log(`Testing print ${i + 1}/${testItems.length}: ${item.title}`);
       const pdfBase64 = await createProductLabelPDF(item, testOrderInfo);
       const jobId = await sendToPrintNode(pdfBase64, `Test ${testOrderInfo.orderNumber} - ${item.title}`);
       results.push({ item: item.title, variant: item.variant_title, jobId: jobId });
@@ -352,3 +404,6 @@ app.get('/health', (req, res) => {
 // app.listen(PORT, () => {
 //   console.log(`🚀 Server running on http://localhost:${PORT}`);
 // });
+
+// --- BƯỚC 4: GỌI HÀM KHỞI ĐỘNG Ở CUỐI FILE ---
+startServer();
