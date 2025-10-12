@@ -63,9 +63,9 @@ if (!mongoUri) {
 const connectMongo = async () => {
   try {
     await mongoose.connect(mongoUri, {
-      serverSelectionTimeoutMS: 10000,
+      serverSelectionTimeoutMS: 30000,  // Tăng lên 30 giây
       socketTimeoutMS: 45000,
-      connectTimeoutMS: 15000,
+      connectTimeoutMS: 30000,          // Tăng lên 30 giây
       retryWrites: true,
       maxPoolSize: 10,
       family: 4 // Force IPv4
@@ -115,6 +115,32 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.static('public'));
 app.set('view engine', 'ejs');
 app.set('views', path.join(__dirname, './'));
+
+// Middleware: Wait for MongoDB connection before processing requests
+app.use(async (req, res, next) => {
+  if (mongoose.connection.readyState === 1) {
+    return next();
+  }
+  
+  // If not connected, wait up to 5 seconds
+  const maxWait = 5000;
+  const startTime = Date.now();
+  
+  while (mongoose.connection.readyState !== 1 && Date.now() - startTime < maxWait) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  
+  if (mongoose.connection.readyState === 1) {
+    logger.log('✅ MongoDB connected after waiting');
+    return next();
+  }
+  
+  logger.error('❌ MongoDB still not connected after waiting');
+  return res.status(503).json({ 
+    error: 'Database connection initializing. Please try again in a few seconds.',
+    dbState: mongoose.connection.readyState
+  });
+});
 
 // PrintNode Configuration
 const PRINTNODE_API_KEY = process.env.PRINTNODE_API_KEY;
@@ -400,8 +426,22 @@ app.post('/api/test-print', async (req, res) => {
 });
 
 // Health Check
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString(), apiConfigured: !!PRINTNODE_API_KEY });
+app.get('/health', async (req, res) => {
+  const states = ['disconnected', 'connected', 'connecting', 'disconnecting'];
+  const currentState = states[mongoose.connection.readyState];
+  
+  // Wait a bit for connection to establish
+  if (mongoose.connection.readyState === 2) {
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+  
+  res.json({ 
+    status: currentState === 'connected' ? 'ok' : 'initializing',
+    dbState: currentState,
+    dbReady: mongoose.connection.readyState === 1,
+    timestamp: new Date().toISOString(), 
+    apiConfigured: !!PRINTNODE_API_KEY 
+  });
 });
 
 // --- KHỞI ĐỘNG SERVER ---
