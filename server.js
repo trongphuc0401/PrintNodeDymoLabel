@@ -3,34 +3,60 @@ const PDFDocument = require('pdfkit');
 const axios = require('axios');
 const path = require('path');
 const mongoose = require('mongoose');
-const pLimit = require('p-limit') .default;
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// --- TỐI ƯU HÓA: TẠO LOGGER ĐƠN GIẢN ---
+// --- LOGGER ---
 const logger = {
   log: (...args) => {
-    // Chỉ log chi tiết khi không ở môi trường production
     if (process.env.NODE_ENV !== 'production') {
       console.log(...args);
     }
   },
-  info: console.log, // Luôn log các thông tin quan trọng
-  error: console.error, // Luôn log lỗi
+  info: console.log,
+  error: console.error,
 };
 
-// Khởi tạo p-limit trực tiếp
-const limit = pLimit(3);
+// --- TẠO LIMIT FUNCTION ĐƠN GIẢN (Thay thế p-limit) ---
+function createLimit(concurrency) {
+  let running = 0;
+  const queue = [];
+
+  const process = async () => {
+    if (running >= concurrency || queue.length === 0) return;
+
+    running++;
+    const { fn, resolve, reject } = queue.shift();
+
+    try {
+      const result = await fn();
+      resolve(result);
+    } catch (error) {
+      reject(error);
+    } finally {
+      running--;
+      process();
+    }
+  };
+
+  return (fn) => {
+    return new Promise((resolve, reject) => {
+      queue.push({ fn, resolve, reject });
+      process();
+    });
+  };
+}
+
+const limit = createLimit(3);
 
 // --- KẾT NỐI MONGODB ---
-// Mongoose sẽ tự động đệm các thao tác cho đến khi kết nối thành công
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => logger.info('✅ MongoDB connection initiated.'))
   .catch(err => logger.error('❌ MongoDB initial connection error:', err.message));
 
-// --- 3. ĐỊNH NGHĨA MONGOOSE SCHEMAS VÀ MODELS ---
+// --- SCHEMAS VÀ MODELS ---
 const PrintJobSchema = new mongoose.Schema({
   printnode_job_id: Number,
   job_attempt_id: { type: String, unique: true, required: true },
@@ -42,18 +68,17 @@ const PrintJobSchema = new mongoose.Schema({
   price: String,
   status: { type: String, enum: ['pending', 'sent', 'failed'], default: 'pending' },
   error_message: String,
-  retry_data: String, // Vẫn là JSON string để dễ dàng parse lại
+  retry_data: String,
 }, { timestamps: { createdAt: 'created_at' } });
 
 const PrintJob = mongoose.model('PrintJob', PrintJobSchema);
 
 const PrintNodeEventSchema = new mongoose.Schema({
   event_type: String,
-  content: mongoose.Schema.Types.Mixed, // Lưu toàn bộ object event
+  content: mongoose.Schema.Types.Mixed,
 }, { timestamps: { createdAt: 'received_at' } });
 
 const PrintNodeEvent = mongoose.model('PrintNodeEvent', PrintNodeEventSchema);
-
 
 // Middleware
 app.use(express.json({ limit: '10mb' }));
@@ -66,9 +91,8 @@ const PRINTNODE_API_KEY = process.env.PRINTNODE_API_KEY;
 const PRINTER_ID = process.env.PRINTER_ID || 74652384;
 const PRINTNODE_WEBHOOK_SECRET = process.env.PRINTNODE_WEBHOOK_SECRET;
 
-// --- CÁC HÀM TIỆN ÍCH (Không đổi) ---
+// --- HÀM TIỆN ÍCH ---
 async function createProductLabelPDF(orderItem, orderInfo) {
-  // ... (Nội dung hàm này giữ nguyên, không cần thay đổi)
   return new Promise((resolve, reject) => {
     try {
       const pageWidth = 164.57;
@@ -80,7 +104,7 @@ async function createProductLabelPDF(orderItem, orderInfo) {
         doc.registerFont('Roboto-Italic', path.join(__dirname, 'fonts', 'Roboto-Italic.ttf'));
       } catch (fontError) {
         logger.error('Lỗi đăng ký font:', fontError.message);
-        doc.font('Helvetica-Bold'); 
+        doc.font('Helvetica-Bold');
       }
       const chunks = [];
       doc.on('data', chunk => chunks.push(chunk));
@@ -89,7 +113,7 @@ async function createProductLabelPDF(orderItem, orderInfo) {
         const base64String = pdfBuffer.toString('base64');
         resolve(base64String);
       });
-      let yPosition = 7; 
+      let yPosition = 7;
       const contentWidth = pageWidth;
       doc.fontSize(6).font('Roboto-Bold').text(orderInfo.orderNumber || 'N/A', 5, yPosition, { width: contentWidth, align: 'center' });
       yPosition += 9;
@@ -110,7 +134,6 @@ async function createProductLabelPDF(orderItem, orderInfo) {
 }
 
 async function sendToPrintNode(pdfBase64, title) {
-  // ... (Nội dung hàm này giữ nguyên, không cần thay đổi)
   try {
     const response = await axios.post(
       'https://api.printnode.com/printjobs',
@@ -135,14 +158,12 @@ async function sendToPrintNode(pdfBase64, title) {
   }
 }
 
-// --- 4. CẬP NHẬT CÁC ROUTE ĐỂ DÙNG MONGOOSE ---
+// --- ROUTES ---
 
 // Dashboard Route
 app.get('/', async (req, res) => {
   try {
     const jobsFromDb = await PrintJob.find().sort({ created_at: -1 }).limit(100);
-    
-    // THÊM DÒNG NÀY ĐỂ KIỂM TRA
     logger.log(`Found ${jobsFromDb.length} jobs in the database.`);
 
     const printerConfig = { printerId: PRINTER_ID, apiConfigured: !!PRINTNODE_API_KEY };
@@ -172,7 +193,7 @@ app.get('/', async (req, res) => {
 // API endpoint to get current jobs
 app.get('/api/jobs', async (req, res) => {
   const jobsFromDb = await PrintJob.find().sort({ created_at: -1 }).limit(100);
-  res.json(jobsFromDb); // Trả về document trực tiếp
+  res.json(jobsFromDb);
 });
 
 // PrintNode Webhook Receiver
@@ -191,11 +212,11 @@ app.post('/printnode-webhook', async (req, res) => {
   res.set('X-PrintNode-Webhook-Status', 'OK').status(200).send('OK');
 });
 
-// Page to display PrintNode webhook events
+// PrintNode Status Page
 app.get('/printnode-status', async (req, res) => {
   const eventsFromDb = await PrintNodeEvent.find().sort({ received_at: -1 }).limit(100);
   res.render('status', {
-    events: eventsFromDb.map(e => e.content), // Lấy nội dung gốc để hiển thị
+    events: eventsFromDb.map(e => e.content),
     webhookConfigured: !!PRINTNODE_WEBHOOK_SECRET
   });
 });
@@ -216,7 +237,7 @@ app.post('/webhooks', async (req, res) => {
   processOrderInBackground(order);
 });
 
-// Hàm xử lý nền
+// Background Processing Function
 async function processOrderInBackground(order) {
   const orderNumber = order.name || order.order_number;
   const lineItems = order.line_items || [];
@@ -231,7 +252,6 @@ async function processOrderInBackground(order) {
     note: order.note
   };
 
-  // 3. Tạo một mảng để chứa tất cả các tác vụ in
   const printTasks = [];
 
   for (const item of lineItems) {
@@ -239,10 +259,7 @@ async function processOrderInBackground(order) {
       const jobAttemptId = `${orderNumber}-${item.id || 'no-id'}-${j + 1}`;
       const retryData = JSON.stringify({ item, orderInfo });
 
-      // 4. Đưa tác vụ vào hàng đợi của p-limit
-      // Mỗi tác vụ là một hàm async được bọc bởi `limit()`
       const task = limit(async () => {
-        // Tạo job với trạng thái 'pending'
         const newJob = new PrintJob({
           job_attempt_id: jobAttemptId,
           order_id: orderNumber,
@@ -262,14 +279,12 @@ async function processOrderInBackground(order) {
           const printTitle = `${orderNumber} - ${item.title}${item.variant_title ? ' - ' + item.variant_title : ''} (${j + 1}/${item.quantity})`;
           const printResponse = await sendToPrintNode(pdfBase64, printTitle);
 
-          // Cập nhật khi thành công
           newJob.status = 'sent';
           newJob.printnode_job_id = printResponse;
           await newJob.save();
           logger.log(`✅ Print job for ${item.title} (Copy ${j + 1}) sent successfully (Job ID: ${printResponse})`);
         } catch (error) {
           logger.error(`❌ Failed to print item ${item.title}, Copy ${j + 1}:`, error.message);
-          // Cập nhật khi thất bại
           newJob.status = 'failed';
           newJob.error_message = error.message;
           await newJob.save();
@@ -279,17 +294,15 @@ async function processOrderInBackground(order) {
     }
   }
 
-  // 5. Chạy tất cả các tác vụ trong hàng đợi
   try {
     await Promise.all(printTasks);
     logger.info(`✅ Finished all tasks for order ${orderNumber}`);
   } catch (error) {
-    // Lỗi này thường không xảy ra vì chúng ta đã bắt lỗi bên trong mỗi task
     logger.error(`🚨 An unexpected error occurred while processing the print queue for order ${orderNumber}:`, error);
   }
 }
 
-// API endpoint to retry a job
+// Retry Job Endpoint
 app.post('/api/retry-job/:jobAttemptId', async (req, res) => {
   const { jobAttemptId } = req.params;
   const originalJob = await PrintJob.findOne({ job_attempt_id: jobAttemptId });
@@ -306,7 +319,6 @@ app.post('/api/retry-job/:jobAttemptId', async (req, res) => {
     const printTitle = `[RETRY] ${orderInfo.orderNumber} - ${item.title}${item.variant_title ? ' - ' + item.variant_title : ''}`;
     const printResponse = await sendToPrintNode(pdfBase64, printTitle);
 
-    // Tạo một bản ghi job MỚI cho lần retry với ĐẦY ĐỦ thông tin
     const newJobAttemptId = `${originalJob.job_attempt_id}-retry-${Date.now()}`;
     await PrintJob.create({
       job_attempt_id: newJobAttemptId,
@@ -318,7 +330,7 @@ app.post('/api/retry-job/:jobAttemptId', async (req, res) => {
       quantity: item.quantity,
       price: item.price,
       status: 'sent',
-      retry_data: originalJob.retry_data // Vẫn lưu lại retry_data để có thể retry tiếp
+      retry_data: originalJob.retry_data
     });
 
     logger.info(`✅ Retry successful! New PrintNode Job ID: ${printResponse}, New DB Job ID: ${newJobAttemptId}`);
@@ -329,9 +341,8 @@ app.post('/api/retry-job/:jobAttemptId', async (req, res) => {
   }
 });
 
-// Test endpoint
+// Test Print Endpoint
 app.post('/api/test-print', async (req, res) => {
-  // ... (Hàm này giữ nguyên, không cần thay đổi)
   try {
     const testItems = [{ title: 'Bạc xỉu pha máy', variant_title: 'ICED', quantity: 2, sku: 'PIC BAS 003', price: '56' }];
     const testOrderInfo = { orderId: '820982911946154508', orderNumber: '#9999', currency: 'VND', note: 'Cafe it duong, nhieu da' };
@@ -352,23 +363,17 @@ app.post('/api/test-print', async (req, res) => {
   }
 });
 
-// Health check
+// Health Check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString(), apiConfigured: !!PRINTNODE_API_KEY });
 });
 
-// --- KHỞI ĐỘNG SERVER (CHO MÔI TRƯỜNG LOCAL/PM2) ---
-// Đoạn code này sẽ kiểm tra xem tệp có được chạy trực tiếp hay không
+// --- KHỞI ĐỘNG SERVER ---
 if (require.main === module) {
   app.listen(PORT, () => {
     logger.info(`🚀 Server running for local/PM2 on http://localhost:${PORT}`);
   });
 }
 
-// --- XUẤT APP (CHO MÔI TRƯỜNG SERVERLESS) ---
-// Luôn xuất đối tượng app để các nền tảng như Vercel có thể sử dụng
-// Debug export
-console.log('🔍 DEBUG: About to export app');
-console.log('🔍 DEBUG: app object:', typeof app);
-console.log('🔍 DEBUG: app._router:', app._router ? 'exists' : 'missing');
+// --- XUẤT APP (CHO SERVERLESS) ---
 module.exports = app;
