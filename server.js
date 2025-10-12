@@ -53,28 +53,27 @@ const limit = createLimit(3);
 
 // --- KẾT NỐI MONGODB ---
 const mongoUri = process.env.MONGODB_URI;
-
-logger.info('🔍 MongoDB URI check:', mongoUri ? '✅ Set' : '❌ NOT SET');
-
 if (!mongoUri) {
-  logger.error('❌ CRITICAL: MONGODB_URI environment variable is not set!');
+  logger.error('❌ MONGODB_URI is not set in .env file. Exiting.');
+  process.exit(1);
 }
 
+// --- TỐI ƯU HÓA KẾT NỐI MONGODB ---
+let cachedDb = null;
+
 const connectMongo = async () => {
+  if (cachedDb && mongoose.connections[0].readyState) {
+    logger.log('🚀 Using cached MongoDB connection.');
+    return cachedDb;
+  }
   try {
-    await mongoose.connect(mongoUri, {
-      serverSelectionTimeoutMS: 30000,  // Tăng lên 30 giây
-      socketTimeoutMS: 45000,
-      connectTimeoutMS: 30000,          // Tăng lên 30 giây
-      retryWrites: true,
-      maxPoolSize: 10,
-      family: 4 // Force IPv4
-    });
-    logger.info('✅ MongoDB connection established successfully');
-    return true;
-  } catch (err) {
-    logger.error('❌ MongoDB connection error:', err.message);
-    return false;
+    logger.info('🔥 Creating new MongoDB connection...');
+    cachedDb = await mongoose.connect(mongoUri);
+    logger.info('✅ MongoDB connected successfully.');
+    return cachedDb;
+  } catch (error) {
+    logger.error('❌ MongoDB connection error:', error.message);
+    throw error;
   }
 };
 
@@ -88,27 +87,28 @@ mongoose.connection.on('error', (err) => logger.error('❌ Mongoose connection e
 
 // --- SCHEMAS VÀ MODELS ---
 const PrintJobSchema = new mongoose.Schema({
-  printnode_job_id: Number,
-  job_attempt_id: { type: String, unique: true, required: true },
-  order_id: { type: String, index: true },
-  product_name: String,
-  variant_title: String,
-  sku: String,
-  quantity: Number,
-  price: String,
-  status: { type: String, enum: ['pending', 'sent', 'failed'], default: 'pending' },
-  error_message: String,
-  retry_data: String,
-}, { timestamps: { createdAt: 'created_at' } });
+  order_id: { type: String, index: true, unique: true }, // Order ID là duy nhất
+  status: { type: String, enum: ['pending', 'processing', 'completed', 'failed'], default: 'pending' },
+  items_to_print: [{
+    product_name: String,
+    variant_title: String,
+    sku: String,
+    quantity: Number,
+    price: String,
+    // Dữ liệu gốc của item để có thể retry
+    original_item_data: mongoose.Schema.Types.Mixed,
+  }],
+  processing_details: [{
+    item_sku: String,
+    printnode_job_id: Number,
+    status: String, // 'sent' hoặc 'failed'
+    error_message: String,
+    timestamp: Date,
+  }],
+  last_error: String,
+}, { timestamps: { createdAt: 'created_at', updatedAt: 'updated_at' } });
 
 const PrintJob = mongoose.model('PrintJob', PrintJobSchema);
-
-const PrintNodeEventSchema = new mongoose.Schema({
-  event_type: String,
-  content: mongoose.Schema.Types.Mixed,
-}, { timestamps: { createdAt: 'received_at' } });
-
-const PrintNodeEvent = mongoose.model('PrintNodeEvent', PrintNodeEventSchema);
 
 // Middleware
 app.use(express.json({ limit: '10mb' }));
@@ -288,168 +288,155 @@ app.get('/printnode-status', async (req, res) => {
   });
 });
 
-// Shopify Webhook Handler
+// --- WEBHOOK ENDPOINT (TỐI ƯU HÓA) ---
 app.post('/webhooks', async (req, res) => {
-  const order = req.body;
-  const orderNumber = order.name || order.order_number;
-  logger.info(`📦 Received webhook for order: ${orderNumber}`);
+  try {
+    await connectMongo(); // Đảm bảo kết nối DB
+    const order = req.body;
+    const orderNumber = order.name || order.order_number;
+    logger.info(`📦 Webhook received for order: ${orderNumber}`);
 
-  const existingJob = await PrintJob.findOne({ order_id: orderNumber });
-  if (existingJob) {
-    logger.log(`⚠️ Order ${orderNumber} already processed. Ignoring duplicate webhook.`);
-    return res.status(200).json({ success: true, message: 'Duplicate webhook ignored.' });
-  }
-
-  res.status(200).json({ success: true, message: `Order ${orderNumber} accepted.` });
-  processOrderInBackground(order);
-});
-
-// Background Processing Function
-async function processOrderInBackground(order) {
-  const orderNumber = order.name || order.order_number;
-  const lineItems = order.line_items || [];
-  logger.info(`⚙️  Starting background processing for order ${orderNumber}`);
-
-  const orderInfo = {
-    orderId: order.id,
-    orderNumber: orderNumber,
-    currency: order.currency,
-    customerName: order.customer ? `${order.customer.first_name} ${order.customer.last_name}` : null,
-    shippingAddress: order.shipping_address,
-    note: order.note
-  };
-
-  const printTasks = [];
-
-  for (const item of lineItems) {
-    for (let j = 0; j < item.quantity; j++) {
-      const jobAttemptId = `${orderNumber}-${item.id || 'no-id'}-${j + 1}`;
-      const retryData = JSON.stringify({ item, orderInfo });
-
-      const task = limit(async () => {
-        const newJob = new PrintJob({
-          job_attempt_id: jobAttemptId,
-          order_id: orderNumber,
-          product_name: item.title,
-          variant_title: item.variant_title,
-          sku: item.sku,
-          quantity: item.quantity,
-          price: item.price,
-          status: 'pending',
-          retry_data: retryData
-        });
-        await newJob.save();
-
-        try {
-          logger.log(`🖨️  Processing item (Copy ${j + 1}/${item.quantity}): ${item.title}`);
-          const pdfBase64 = await createProductLabelPDF(item, orderInfo);
-          const printTitle = `${orderNumber} - ${item.title}${item.variant_title ? ' - ' + item.variant_title : ''} (${j + 1}/${item.quantity})`;
-          const printResponse = await sendToPrintNode(pdfBase64, printTitle);
-
-          newJob.status = 'sent';
-          newJob.printnode_job_id = printResponse;
-          await newJob.save();
-          logger.log(`✅ Print job for ${item.title} (Copy ${j + 1}) sent successfully (Job ID: ${printResponse})`);
-        } catch (error) {
-          logger.error(`❌ Failed to print item ${item.title}, Copy ${j + 1}:`, error.message);
-          newJob.status = 'failed';
-          newJob.error_message = error.message;
-          await newJob.save();
-        }
-      });
-      printTasks.push(task);
+    // 1. Kiểm tra xem order đã tồn tại chưa
+    const existingJob = await PrintJob.findOne({ order_id: orderNumber });
+    if (existingJob) {
+      logger.log(`⚠️ Order ${orderNumber} already exists. Ignoring duplicate.`);
+      return res.status(200).json({ message: 'Duplicate ignored.' });
     }
-  }
 
-  try {
-    await Promise.all(printTasks);
-    logger.info(`✅ Finished all tasks for order ${orderNumber}`);
-  } catch (error) {
-    logger.error(`🚨 An unexpected error occurred while processing the print queue for order ${orderNumber}:`, error);
-  }
-}
-
-// Retry Job Endpoint
-app.post('/api/retry-job/:jobAttemptId', async (req, res) => {
-  const { jobAttemptId } = req.params;
-  const originalJob = await PrintJob.findOne({ job_attempt_id: jobAttemptId });
-
-  if (!originalJob || !originalJob.retry_data) {
-    return res.status(404).json({ success: false, message: 'Job not found or not retryable.' });
-  }
-
-  try {
-    const { item, orderInfo } = JSON.parse(originalJob.retry_data);
-    logger.info(`🔁 Retrying print for: ${item.title} from Order ${orderInfo.orderNumber}`);
-
-    const pdfBase64 = await createProductLabelPDF(item, orderInfo);
-    const printTitle = `[RETRY] ${orderInfo.orderNumber} - ${item.title}${item.variant_title ? ' - ' + item.variant_title : ''}`;
-    const printResponse = await sendToPrintNode(pdfBase64, printTitle);
-
-    const newJobAttemptId = `${originalJob.job_attempt_id}-retry-${Date.now()}`;
-    await PrintJob.create({
-      job_attempt_id: newJobAttemptId,
-      printnode_job_id: printResponse,
-      order_id: orderInfo.orderNumber,
-      product_name: item.title,
-      variant_title: item.variant_title,
-      sku: item.sku,
-      quantity: item.quantity,
-      price: item.price,
-      status: 'sent',
-      retry_data: originalJob.retry_data
+    // 2. Tạo một job duy nhất cho cả order
+    const newPrintJob = new PrintJob({
+      order_id: orderNumber,
+      status: 'pending',
+      items_to_print: order.line_items.map(item => ({
+        product_name: item.title,
+        variant_title: item.variant_title,
+        sku: item.sku,
+        quantity: item.quantity,
+        price: item.price,
+        original_item_data: item, // Lưu lại toàn bộ item gốc
+      })),
     });
 
-    logger.info(`✅ Retry successful! New PrintNode Job ID: ${printResponse}, New DB Job ID: ${newJobAttemptId}`);
-    res.json({ success: true, message: 'Job successfully retried as a new print job.' });
+    // 3. Lưu vào DB và trả về ngay lập tức
+    await newPrintJob.save();
+    logger.info(`✅ Order ${orderNumber} saved as a pending job.`);
+    
+    // Rất quan trọng: Trả về 200 OK ngay lập tức
+    res.status(200).json({ success: true, message: 'Order received and queued for printing.' });
+
   } catch (error) {
-    logger.error(`❌ Retry failed for job ${jobAttemptId}:`, error.message);
-    res.status(500).json({ success: false, message: 'Failed to retry job.', error: error.message });
+    logger.error('❌ Error in webhook endpoint:', error.message);
+    res.status(500).json({ success: false, message: 'Internal server error.' });
   }
 });
 
-// Test Print Endpoint
-app.post('/api/test-print', async (req, res) => {
+// --- API ENDPOINT ĐỂ IN LẠI MỘT ĐƠN HÀNG ---
+app.post('/api/retry-order/:orderId', async (req, res) => {
+  const { orderId } = req.params;
+
   try {
-    const testItems = [{ title: 'Bạc xỉu pha máy', variant_title: 'ICED', quantity: 2, sku: 'PIC BAS 003', price: '56' }];
-    const testOrderInfo = { orderId: '820982911946154508', orderNumber: '#9999', currency: 'VND', note: 'Cafe it duong, nhieu da' };
-    const results = [];
-    for (let i = 0; i < testItems.length; i++) {
-      const item = testItems[i];
-      logger.log(`Testing print ${i + 1}/${testItems.length}: ${item.title}`);
-      const pdfBase64 = await createProductLabelPDF(item, testOrderInfo);
-      const jobId = await sendToPrintNode(pdfBase64, `Test ${testOrderInfo.orderNumber} - ${item.title}`);
-      results.push({ item: item.title, variant: item.variant_title, jobId: jobId });
-      if (i < testItems.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 500));
+    await connectMongo();
+
+    // Tìm job gốc và đặt lại trạng thái của nó
+    const updatedJob = await PrintJob.findOneAndUpdate(
+      { order_id: orderId },
+      { 
+        $set: { 
+          status: 'pending', // Đặt lại trạng thái về 'pending'
+          processing_details: [], // Xóa lịch sử xử lý cũ
+          last_error: null, // Xóa lỗi cũ
+        } 
+      },
+      { new: true } // Trả về document đã được cập nhật
+    );
+
+    if (!updatedJob) {
+      return res.status(404).json({ success: false, message: 'Order not found.' });
+    }
+
+    logger.info(`✅ Order ${orderId} has been reset to 'pending' for retry.`);
+    res.json({ success: true, message: 'Order successfully queued for retry.' });
+
+  } catch (error) {
+    logger.error(`❌ Failed to retry order ${orderId}:`, error.message);
+    res.status(500).json({ success: false, message: 'Failed to retry order.', error: error.message });
+  }
+});
+
+// --- CRON JOB ENDPOINT ĐỂ XỬ LÝ IN ẤN ---
+app.get('/api/cron/process-jobs', async (req, res) => {
+  // 1. Bảo vệ endpoint
+  const authHeader = req.headers.authorization;
+  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+
+  try {
+    await connectMongo();
+    logger.info('⚙️ Cron job started: Looking for pending jobs...');
+
+    // 2. Tìm một job 'pending' để xử lý
+    const job = await PrintJob.findOneAndUpdate(
+      { status: 'pending' },
+      { $set: { status: 'processing' } },
+      { new: true, sort: { created_at: 1 } }
+    );
+
+    if (!job) {
+      logger.info('✅ No pending jobs to process.');
+      return res.status(200).json({ message: 'No pending jobs.' });
+    }
+
+    logger.info(`🖨️ Processing order ${job.order_id}...`);
+    let hasFailedItems = false;
+
+    // 3. Lặp qua từng item và in
+    for (const item of job.items_to_print) {
+      for (let i = 0; i < item.quantity; i++) {
+        try {
+          const orderInfo = { orderNumber: job.order_id }; // Đơn giản hóa orderInfo
+          const pdfBase64 = await createProductLabelPDF(item.original_item_data, orderInfo);
+          const printTitle = `${job.order_id} - ${item.product_name} (${i + 1}/${item.quantity})`;
+          const printResponse = await sendToPrintNode(pdfBase64, printTitle);
+
+          job.processing_details.push({
+            item_sku: item.sku,
+            printnode_job_id: printResponse,
+            status: 'sent',
+            timestamp: new Date(),
+          });
+        } catch (error) {
+          hasFailedItems = true;
+          job.processing_details.push({
+            item_sku: item.sku,
+            status: 'failed',
+            error_message: error.message,
+            timestamp: new Date(),
+          });
+          logger.error(`❌ Failed to print item ${item.sku} for order ${job.order_id}:`, error.message);
+        }
       }
     }
-    res.json({ success: true, message: `Sent ${testItems.length} print jobs`, results: results });
+
+    // 4. Cập nhật trạng thái cuối cùng của job
+    job.status = hasFailedItems ? 'failed' : 'completed';
+    if (hasFailedItems) {
+      job.last_error = 'One or more items failed to print. Check processing_details.';
+    }
+    await job.save();
+
+    logger.info(`✅ Finished processing order ${job.order_id} with status: ${job.status}`);
+    res.status(200).json({ success: true, order_id: job.order_id, status: job.status });
+
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    logger.error('🚨 Critical error in cron job processor:', error);
+    // Cố gắng cập nhật lại job về 'failed' nếu có lỗi nghiêm trọng
+    // (Cần thêm logic để tìm job đang 'processing' và cập nhật)
+    res.status(500).json({ success: false, message: 'Cron job failed.' });
   }
 });
 
-// Health Check
-app.get('/health', async (req, res) => {
-  const states = ['disconnected', 'connected', 'connecting', 'disconnecting'];
-  const currentState = states[mongoose.connection.readyState];
-  
-  // Wait a bit for connection to establish
-  if (mongoose.connection.readyState === 2) {
-    await new Promise(resolve => setTimeout(resolve, 2000));
-  }
-  
-  res.json({ 
-    status: currentState === 'connected' ? 'ok' : 'initializing',
-    dbState: currentState,
-    dbReady: mongoose.connection.readyState === 1,
-    timestamp: new Date().toISOString(), 
-    apiConfigured: !!PRINTNODE_API_KEY 
-  });
-});
-
-// --- KHỞI ĐỘNG SERVER ---
+// --- KHỞI ĐỘNG SERVER (CHO MÔI TRƯỜNG LOCAL/PM2) ---
 let isServerRunning = false;
 
 async function startServer() {

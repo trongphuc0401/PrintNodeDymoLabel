@@ -375,10 +375,10 @@
                       <% } %>
                   </td>
                   <td data-label="Actions">
-                    <%# Chỉ hiển thị nút nếu jobAttemptId tồn tại %>
-                      <% if (job.jobAttemptId) { %>
-                        <button class="retry-btn" onclick="retryJob(event, '<%= job.jobAttemptId %>')"
-                          title="In lại job này">
+                    <%# Chỉ hiển thị nút nếu job có trạng thái 'failed' hoặc 'completed' %>
+                      <% if (['failed', 'completed' ].includes(job.status)) { %>
+                        <button class="retry-btn" onclick="retryOrder(event, '<%= job.orderId %>')"
+                          title="In lại toàn bộ đơn hàng này">
                           🔄 In lại
                         </button>
                         <% } %>
@@ -399,35 +399,32 @@
       window.location.reload();
     }
 
-    // Hàm để gọi API retry
-    async function retryJob(event, jobAttemptId) { // Đảm bảo có 'event'
+    // HÀM MỚI: Đặt lại trạng thái đơn hàng để in lại
+    async function retryOrder(event, orderId) {
       const button = event.target;
       const originalText = button.innerHTML;
       button.disabled = true;
       button.innerHTML = 'Đang xử lý...';
 
       try {
-        const response = await fetch(`/api/retry-job/${jobAttemptId}`, {
+        // Gọi đến API endpoint mới
+        const response = await fetch(`/api/retry-order/${orderId}`, {
           method: 'POST',
         });
 
-        // Cố gắng parse JSON, nếu thất bại (vì server trả về HTML), sẽ nhảy vào catch
         const result = await response.json();
 
         if (!response.ok) {
-          // Nếu server trả về lỗi (4xx, 5xx) nhưng vẫn là JSON
           throw new Error(result.message || 'Lỗi không xác định từ server.');
         }
 
-        alert('Thành công! Lệnh in lại đã được gửi đi.');
+        alert('Thành công! Đơn hàng đã được đưa vào hàng đợi để in lại.');
         setTimeout(() => {
           window.location.reload();
         }, 1000);
 
       } catch (error) {
-        // Catch này sẽ bắt cả lỗi mạng, lỗi parse JSON, và lỗi logic ở trên
         console.error('Retry failed:', error);
-        // Hiển thị thông báo lỗi cụ thể hơn
         alert(`Thất bại: ${error.message}`);
         button.disabled = false;
         button.innerHTML = originalText;
