@@ -52,9 +52,21 @@ function createLimit(concurrency) {
 const limit = createLimit(3);
 
 // --- KẾT NỐI MONGODB ---
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => logger.info('✅ MongoDB connection initiated.'))
-  .catch(err => logger.error('❌ MongoDB initial connection error:', err.message));
+mongoose.connect(process.env.MONGODB_URI, {
+  serverSelectionTimeoutMS: 5000,
+  socketTimeoutMS: 45000,
+  connectTimeoutMS: 10000,
+  retryWrites: true,
+  maxPoolSize: 10,
+  minPoolSize: 5
+})
+  .then(() => logger.info('✅ MongoDB connection established.'))
+  .catch(err => logger.error('❌ MongoDB connection error:', err.message));
+
+// Log connection events
+mongoose.connection.on('connected', () => logger.info('✅ Mongoose connected to MongoDB'));
+mongoose.connection.on('disconnected', () => logger.info('⚠️ Mongoose disconnected from MongoDB'));
+mongoose.connection.on('error', (err) => logger.error('❌ Mongoose connection error:', err.message));
 
 // --- SCHEMAS VÀ MODELS ---
 const PrintJobSchema = new mongoose.Schema({
@@ -163,6 +175,12 @@ async function sendToPrintNode(pdfBase64, title) {
 // Dashboard Route
 app.get('/', async (req, res) => {
   try {
+    // Check if MongoDB is connected
+    if (mongoose.connection.readyState !== 1) {
+      logger.error('❌ MongoDB is not connected. Current state:', mongoose.connection.readyState);
+      return res.status(503).send('Database connection unavailable. Please try again later.');
+    }
+
     const jobsFromDb = await PrintJob.find().sort({ created_at: -1 }).limit(100);
     logger.log(`Found ${jobsFromDb.length} jobs in the database.`);
 
@@ -185,7 +203,7 @@ app.get('/', async (req, res) => {
       printerConfig: printerConfig
     });
   } catch (error) {
-    logger.error("❌ Error fetching jobs for dashboard:", error);
+    logger.error("❌ Error fetching jobs for dashboard:", error.message);
     res.status(500).send("Error loading dashboard data. Check server logs.");
   }
 });
