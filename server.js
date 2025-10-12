@@ -367,4 +367,8 @@ if (require.main === module) {
 
 // --- XUẤT APP (CHO MÔI TRƯỜNG SERVERLESS) ---
 // Luôn xuất đối tượng app để các nền tảng như Vercel có thể sử dụng
+// Debug export
+console.log('🔍 DEBUG: About to export app');
+console.log('🔍 DEBUG: app object:', typeof app);
+console.log('🔍 DEBUG: app._router:', app._router ? 'exists' : 'missing');
 module.exports = app;
