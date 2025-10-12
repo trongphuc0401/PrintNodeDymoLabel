@@ -3,7 +3,7 @@ const PDFDocument = require('pdfkit');
 const axios = require('axios');
 const path = require('path');
 const mongoose = require('mongoose');
-const pLimit = require('p-limit'); // SỬA DÒNG NÀY: Bỏ .default
+const pLimit = require('p-limit') .default;
 require('dotenv').config();
 
 const app = express();
