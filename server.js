@@ -149,7 +149,7 @@ app.use(async (req, res, next) => {
 
 // PrintNode Configuration
 const PRINTNODE_API_KEY = process.env.PRINTNODE_API_KEY;
-const PRINTER_ID = process.env.PRINTER_ID || 74652384;
+const PRINTER_ID = process.env.PRINTER_ID || 74793269;
 const PRINTNODE_WEBHOOK_SECRET = process.env.PRINTNODE_WEBHOOK_SECRET;
 
 // --- HÀM TIỆN ÍCH ---
